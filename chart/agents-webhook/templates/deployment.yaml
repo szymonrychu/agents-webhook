@@ -72,11 +72,11 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: 8000
           readinessProbe:
             httpGet:
               path: /readyz
-              port: http
+              port: 8000
           {{- end }}
           {{- with $cfg.resources }}
           resources:
