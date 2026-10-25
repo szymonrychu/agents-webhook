@@ -219,3 +219,11 @@ def test_lint_with_ci_values():
 
 def test_render_without_required_values_fails():
     assert "is required" in render_error({})
+
+
+def test_probes_use_numeric_port():
+    deps = deployments(render())
+    for name in ("ingest", "api"):
+        c = main_container(deps[name])
+        assert c["livenessProbe"]["httpGet"]["port"] == 8000
+        assert c["readinessProbe"]["httpGet"]["port"] == 8000
