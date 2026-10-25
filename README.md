@@ -39,7 +39,7 @@ An endpoint's `prompt_template` is a Jinja2 template for the initial prompt. Wit
 
 The UI API lives under `/webhooks/api/v1` in the `api` Deployment behind the SSO sidecar. Errors are `{"error": {"code": "...", "message": "..."}}`; codes: `invalid_request` (422), `unknown_preset` (422), `not_found` (404), `suffix_taken` (409), `orchestrator_unavailable` (503), `unavailable` (503). The committed schema is `openapi.json` (regenerate with `uv run python -m agents_webhook.api.openapi > openapi.json`; a test fails on drift).
 
-Calling headless: through SSO send a Keycloak bearer token (`Authorization: Bearer $TOKEN`); the sidecar must accept it, which needs the issuer in `SKIP_JWT_BEARER_TOKENS`. Without SSO, `kubectl -n agents port-forward deploy/agents-webhook-api 8000:8000` (the api container port) and use `http://localhost:8000`. The examples use:
+Calling headless: through SSO send a Keycloak bearer token (`Authorization: Bearer $TOKEN`); the injected oauth2-proxy sidecar already accepts it (it sets `OAUTH2_PROXY_SKIP_JWT_BEARER_TOKENS=true` itself), so no per-deployment setting is needed. Without SSO, `kubectl -n agents port-forward deploy/agents-webhook-api 8000:8000` (the api container port) and use `http://localhost:8000`. The examples use:
 
 ```
 API=https://lab.szymonrichert.pl/webhooks/api/v1
