@@ -104,9 +104,7 @@ async def test_endpoints_create_defaults_random_credentials_and_full_url(api, pr
 
 
 async def test_endpoints_create_with_user_suffix_and_credentials(api, preset, conn):
-    resp = await create(
-        api, preset, suffix="my-hook", username="bob", password=PW_A
-    )
+    resp = await create(api, preset, suffix="my-hook", username="bob", password=PW_A)
     assert resp.status_code == 201
     body = resp.json()
     assert (body["suffix"], body["username"]) == ("my-hook", "bob")
