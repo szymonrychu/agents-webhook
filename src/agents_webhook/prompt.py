@@ -7,6 +7,7 @@ frame them themselves. Any render failure raises `TemplateError` (the event fail
 `template_error`).
 """
 
+import asyncio
 import json
 import multiprocessing
 from dataclasses import asdict
@@ -160,8 +161,11 @@ def _child(conn, event, template, payload) -> None:
 
 
 def _mp_context():
-    methods = multiprocessing.get_all_start_methods()
-    return multiprocessing.get_context("fork" if "fork" in methods else "spawn")
+    if "forkserver" in multiprocessing.get_all_start_methods():
+        ctx = multiprocessing.get_context("forkserver")
+        ctx.set_forkserver_preload(["jinja2", "agents_webhook.prompt"])
+        return ctx
+    return multiprocessing.get_context("spawn")
 
 
 def _render_template(
@@ -171,10 +175,13 @@ def _render_template(
         _check_size(template)
     except ValueError as exc:
         raise TemplateError(str(exc)) from exc
-    ctx = _mp_context()
-    parent, child = ctx.Pipe(duplex=False)
-    proc = ctx.Process(target=_child, args=(child, event, template, payload), daemon=True)
-    proc.start()
+    try:
+        ctx = _mp_context()
+        parent, child = ctx.Pipe(duplex=False)
+        proc = ctx.Process(target=_child, args=(child, event, template, payload), daemon=True)
+        proc.start()
+    except Exception as exc:
+        raise TemplateError(f"template render failed to start: {exc}") from exc
     child.close()
     try:
         if not parent.poll(timeout):
@@ -249,3 +256,25 @@ def preview(
     """Render `template` against an example payload (and a sample event) to check it."""
     validate_template(template)
     return render(event or SAMPLE_EVENT, template, payload=payload, timeout=timeout)
+
+
+async def render_async(
+    event: NormalizedEvent,
+    template: str | None,
+    *,
+    update: bool = False,
+    payload: dict[str, Any] | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> str:
+    return await asyncio.to_thread(
+        render, event, template, update=update, payload=payload, timeout=timeout
+    )
+
+
+async def preview_async(
+    template: str,
+    payload: dict[str, Any] | None = None,
+    event: NormalizedEvent | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> str:
+    return await asyncio.to_thread(preview, template, payload, event, timeout)

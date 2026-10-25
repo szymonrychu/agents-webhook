@@ -181,3 +181,40 @@ def test_template_oversize_text_rejected():
         render(make(), big)
     with pytest.raises(ValueError, match="16384"):
         validate_template(big)
+
+
+def test_template_render_with_live_thread_emits_no_fork_warning():
+    import threading
+    import warnings
+
+    stop = threading.Event()
+    t = threading.Thread(target=stop.wait)
+    t.start()
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert render(make(), "{{ title }}") == "T"
+        assert not [w for w in caught if "fork" in str(w.message).lower()]
+    finally:
+        stop.set()
+        t.join()
+
+
+def test_template_start_failure_is_template_error(monkeypatch):
+    from agents_webhook import prompt
+
+    def boom():
+        raise OSError("no processes")
+
+    monkeypatch.setattr(prompt, "_mp_context", boom)
+    with pytest.raises(TemplateError, match="start"):
+        render(make(), "{{ title }}")
+
+
+async def test_template_async_wrappers():
+    from agents_webhook.prompt import preview_async, render_async
+
+    assert await render_async(make(), "{{ title }}") == "T"
+    assert (await preview_async("{{ payload.a }}", {"a": 1})) == "1"
+    with pytest.raises(TemplateError):
+        await render_async(make(), "{{ nope }}")
