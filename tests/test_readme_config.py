@@ -17,7 +17,6 @@ README = (Path(__file__).resolve().parent.parent / "README.md").read_text(encodi
 STATUSES = ("new", "in-progress", "handled", "ignored", "failed")
 REASONS = (
     "self_event",
-    "author_not_allowed",
     "resolved",
     "filter_denied",
     "filter_not_allowed",
@@ -94,3 +93,8 @@ def test_filters_section_lists_every_field(endpoint_type, field):
     text = section("Filters")
     assert f"`{field}`" in text
     assert f"`{endpoint_type}`" in text
+
+
+def test_retired_author_allowlist_not_documented():
+    assert "WEBHOOK_ALLOWED_AUTHORS" not in README
+    assert "author_not_allowed" not in README

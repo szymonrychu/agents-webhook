@@ -119,7 +119,16 @@ def test_settings_defaults(base_env):
     assert s.events_retention_days == 30
     assert s.auth_failures_per_minute == 10
     assert s.min_password_length == 16
-    assert s.bot_logins == [] and s.allowed_authors == [] and s.trusted_proxies == []
+    assert s.bot_logins == [] and s.trusted_proxies == []
+
+
+def test_allowed_authors_retired(base_env, monkeypatch):
+    assert "allowed_authors" not in WebhookSettings.model_fields
+    baseline = load_settings(WebhookSettings).model_dump()
+    monkeypatch.setenv("WEBHOOK_ALLOWED_AUTHORS", "alice,bob")
+    s = load_settings(WebhookSettings)
+    assert not hasattr(s, "allowed_authors")
+    assert s.model_dump() == baseline
 
 
 def test_settings_env_overrides_and_trailing_slash(base_env, monkeypatch):

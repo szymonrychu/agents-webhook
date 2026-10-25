@@ -92,9 +92,7 @@ def verdict(
     Built-in rules first, then the endpoint's filters; an evaluation failure fails closed and
     is logged by type with `context`.
     """
-    reason = classify(
-        event, bot_logins=settings.bot_logins, allowed_authors=settings.allowed_authors
-    )
+    reason = classify(event, bot_logins=settings.bot_logins)
     if reason is not None:
         return reason
     try:

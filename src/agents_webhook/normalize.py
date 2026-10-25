@@ -2,7 +2,9 @@
 
 An endpoint has exactly one type; `normalize` parses a payload for that type, raises
 `TypeMismatch` when the payload is a valid provider event of another type and `Unsupported`
-when it is no supported event at all. `classify` returns the ignore reason or None.
+when it is no supported event at all. `classify` returns the built-in ignore reason or None:
+`self_event` for an actor in `WEBHOOK_BOT_LOGINS`, then `resolved` and `action_ignored`. An
+author allowlist is an endpoint filter (`allow` rule on `author`), not a rule here.
 """
 
 import hashlib
@@ -274,18 +276,10 @@ def normalize(endpoint_type: str, headers: Mapping[str, str], payload: Any) -> N
     return (_github if provider == "github" else _gitlab)(endpoint_type, headers, payload)
 
 
-def classify(
-    event: NormalizedEvent, *, bot_logins: Collection[str], allowed_authors: Collection[str]
-) -> str | None:
-    """The ignore reason for a normalised event, or None when it should run."""
+def classify(event: NormalizedEvent, *, bot_logins: Collection[str]) -> str | None:
+    """The built-in ignore reason for a normalised event, or None when it should run."""
     if event.actor and event.actor in bot_logins:
         return "self_event"
-    if (
-        event.kind in {"issue", "comment"}
-        and allowed_authors
-        and event.author not in allowed_authors
-    ):
-        return "author_not_allowed"
     if event.kind == "alert":
         return None if event.action == "firing" else "resolved"
     if event.action not in _HANDLED_ACTIONS[event.kind]:

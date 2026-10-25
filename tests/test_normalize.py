@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 
 import pytest
@@ -14,8 +15,8 @@ from agents_webhook.normalize import (
 from . import payloads as p
 
 
-def _classify(event, bots=(), allowed=()):
-    return classify(event, bot_logins=bots, allowed_authors=allowed)
+def _classify(event, bots=()):
+    return classify(event, bot_logins=bots)
 
 
 def test_endpoint_types():
@@ -216,15 +217,12 @@ def test_classify_self_event():
     assert _classify(ev, bots={"other"}) is None
 
 
-def test_classify_author_not_allowed():
+def test_classify_has_no_author_allowlist():
+    assert "allowed_authors" not in inspect.signature(classify).parameters
     issue = normalize("github-issue", p.gh_headers("issues"), p.gh_issues())
     comment = normalize("github-pr", p.gh_headers("issue_comment"), p.gh_issue_comment(on_pr=True))
-    pr = normalize("github-pr", p.gh_headers("pull_request"), p.gh_pull_request())
-    assert _classify(issue, allowed={"carol"}) == "author_not_allowed"
-    assert _classify(comment, allowed={"alice"}) == "author_not_allowed"
-    assert _classify(issue, allowed={"alice"}) is None
-    assert _classify(pr, allowed={"carol"}) is None
     assert _classify(issue) is None
+    assert _classify(comment) is None
 
 
 @pytest.mark.parametrize("action", ["closed", "labeled", "unlabeled", "converted_to_draft"])

@@ -23,7 +23,6 @@ Every setting is an environment variable. The first block is read by all subcomm
 |---|---|---|
 | `WEBHOOK_PUBLIC_BASE_URL` | `https://lab.szymonrichert.pl` | base of the printed endpoint URLs (trailing slash removed) |
 | `WEBHOOK_BOT_LOGINS` | empty | comma-separated logins whose own events are ignored (`self_event`) |
-| `WEBHOOK_ALLOWED_AUTHORS` | empty (everyone) | comma-separated authors allowed to start work from issues and comments (`author_not_allowed` otherwise) |
 | `WEBHOOK_MAX_IN_PROGRESS` | 3 | events running at once, overall |
 | `WEBHOOK_MAX_IN_PROGRESS_PER_ENDPOINT` | 1 | events running at once for one endpoint |
 | `WEBHOOK_MAX_QUEUE` | 500 | `new` events kept before further ones are ignored as `queue_full` |
@@ -72,6 +71,8 @@ Configure the sender with the endpoint URL and its credentials:
 
 Each endpoint carries `filters = {"allow": [Rule], "deny": [Rule]}` with `Rule = {"field", "match", "values"}`; `match` is `equals` (the default) or `regex`. Empty lists accept every event.
 
+An author allowlist is an endpoint `allow` rule on `author` (for example `{"field": "author", "values": ["alice", "bob"]}`); there is no global author setting. `WEBHOOK_BOT_LOGINS` stays global: it is the self-loop guard (`self_event`) and runs before any filter.
+
 - Order: the first deny rule (in list order) that matches ignores the event with `filter_denied: <field>`; otherwise the first allow rule that does not match ignores it with `filter_not_allowed: <field>`. Allow rules combine with AND, the values within one rule with OR.
 - Fields per type: `github-issue` and `gitlab-issue` offer `author`, `actor`, `repo`, `labels`, `title`, `body`, `comment`, `kind`, `action`; `github-pr` and `gitlab-mr` add `source_branch` and `target_branch`; `grafana-alert` offers `labels`, `title`, `body`. A field the event does not carry (for example `comment` on a non-comment event) never matches: it fails an allow rule and never trips a deny rule. A list field (forge `labels`) matches when any element matches.
 - Not applicable, and why: `grafana-alert` has no `author`, `actor`, `repo` or `comment` (alerts carry none), no `kind` (always an alert) and no `action` (a non-firing alert is already `resolved`); issue types have no `source_branch` or `target_branch` (issues have no branch), and a `issue_comment` on a pull request carries none either, so they are absent there. Not offered for any type: `number`, `url`, `draft`, `changed` (the built-in rules already decide drafts and title-only edits), the delivery id, the dedup key, the priority and the raw payload.
@@ -97,7 +98,6 @@ An event has one of five statuses: `new` (queued), `in-progress` (claimed, runni
 | Reason | Status | Meaning |
 |---|---|---|
 | `self_event` | `ignored` | the actor is one of `WEBHOOK_BOT_LOGINS` |
-| `author_not_allowed` | `ignored` | author not in `WEBHOOK_ALLOWED_AUTHORS` |
 | `resolved` | `ignored` | a Grafana alert that is not firing |
 | `action_ignored` | `ignored` | an action that starts no work (closed, labeled, draft merge request, title-only edit) |
 | `type_mismatch` | `ignored` | a provider event of another endpoint type |
