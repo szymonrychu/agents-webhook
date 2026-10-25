@@ -1,0 +1,34 @@
+[tools]
+python = "3.12"
+uv = "latest"
+
+[env]
+UV_PYTHON_DOWNLOADS = "never"
+
+[tasks.install]
+description = "Install dependencies into the venv"
+run = "uv sync"
+
+[tasks.test]
+description = "Run the test suite"
+run = "uv run pytest"
+
+[tasks.lint]
+description = "Lint and check formatting"
+run = "uv run ruff check . && uv run ruff format --check ."
+
+[tasks.fmt]
+description = "Format and autofix"
+run = "uv run ruff format . && uv run ruff check --fix ."
+
+[tasks."test:chart"]
+description = "Run the chart tests"
+run = "uv run pytest tests/test_chart_*.py -q"
+
+[tasks."lint:chart"]
+description = "Lint the helm chart"
+run = "helm lint chart"
+
+[tasks."test:e2e"]
+description = "Run the end-to-end tests"
+run = "uv run pytest tests/e2e -q"
