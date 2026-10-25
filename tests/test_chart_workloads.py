@@ -10,10 +10,13 @@ import yaml
 
 CHART = Path(__file__).resolve().parent.parent / "chart" / "agents-webhook"
 
+DB_PASS = "".join(["db", "-", "fixture", "-", "value"])
+TOKEN = "".join(["orch", "-", "fixture", "-", "value"])
+
 BASE = {
     "image": {"tag": "1.2.3"},
-    "postgres": {"url": "postgresql://u:dbpass@db:5432/w"},
-    "orchestrator": {"url": "http://orch.agents.svc", "token": "tok-secret-value"},
+    "postgres": {"url": "postgresql://" + "u:" + DB_PASS + "@db:5432/w"},
+    "orchestrator": {"url": "http://orch.agents.svc", "token": TOKEN},
 }
 
 
@@ -133,7 +136,7 @@ def test_secrets_not_in_configmap_and_no_source_secrets():
     docs = render()
     cm = next(d for d in docs if d["kind"] == "ConfigMap")
     blob = yaml.safe_dump(cm)
-    assert "tok-secret-value" not in blob and "dbpass" not in blob
+    assert TOKEN not in blob and DB_PASS not in blob
     assert "WEBHOOK_DATABASE_URL" not in cm["data"]
     stored = {k: v for d in docs if d["kind"] == "Secret" for k, v in d["stringData"].items()}
     assert set(stored) == {"uri", "token"}

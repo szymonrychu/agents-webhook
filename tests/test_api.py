@@ -1,6 +1,7 @@
 """The UI API: endpoints create/list/rotate/delete, events, templates preview, meta."""
 
 import json
+import secrets
 from typing import Any
 
 import httpx
@@ -17,6 +18,8 @@ from agents_webhook.settings import WebhookSettings
 
 from . import payloads as p
 from .test_worker import ev
+
+PW_A, PW_B, PW_C = (secrets.token_urlsafe(24) for _ in range(3))
 
 P = "/webhooks/api/v1"
 
@@ -102,13 +105,13 @@ async def test_endpoints_create_defaults_random_credentials_and_full_url(api, pr
 
 async def test_endpoints_create_with_user_suffix_and_credentials(api, preset, conn):
     resp = await create(
-        api, preset, suffix="my-hook", username="bob", password="a-long-enough-password"
+        api, preset, suffix="my-hook", username="bob", password=PW_A
     )
     assert resp.status_code == 201
     body = resp.json()
     assert (body["suffix"], body["username"]) == ("my-hook", "bob")
-    assert body["password"] == "a-long-enough-password"
-    assert await endpoints.authenticate(conn, "my-hook", _basic("bob", "a-long-enough-password"))
+    assert body["password"] == PW_A
+    assert await endpoints.authenticate(conn, "my-hook", _basic("bob", PW_A))
 
 
 def _basic(u: str, pw: str) -> str:
@@ -205,7 +208,7 @@ async def test_invalid_orchestrator_down_503(settings, pool, fake):
 
 
 async def test_rotate_new_credentials_old_stop_authenticating(api, preset, conn):
-    created = (await create(api, preset, password="the-first-password-1")).json()
+    created = (await create(api, preset, password=PW_B)).json()
     resp = await api.post(f"{P}/endpoints/{created['id']}/rotate", json={})
     assert resp.status_code == 200
     assert resp.headers["cache-control"] == "no-store"
@@ -226,7 +229,7 @@ async def test_rotate_new_credentials_old_stop_authenticating(api, preset, conn)
 async def test_rotate_given_credentials_and_short_password(api, preset):
     created = (await create(api, preset)).json()
     url = f"{P}/endpoints/{created['id']}/rotate"
-    ok = await api.post(url, json={"username": "carol", "password": "carol-long-password-1"})
+    ok = await api.post(url, json={"username": "carol", "password": PW_C})
     assert ok.json()["username"] == "carol"
     bad = await api.post(url, json={"password": "x"})
     assert bad.status_code == 422 and code(bad) == "invalid_request"

@@ -1,5 +1,6 @@
 import base64
 import re
+import secrets
 
 import psycopg
 import pytest
@@ -11,6 +12,10 @@ from agents_webhook.db.endpoints import Credentials, EndpointIn, SuffixTaken
 TYPES = ["grafana-alert", "gitlab-issue", "gitlab-mr", "github-issue", "github-pr"]
 MIN = 16
 URLSAFE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def fake_password() -> str:
+    return secrets.token_urlsafe(24)
 
 
 def basic(username: str, password: str) -> str:
@@ -241,8 +246,9 @@ def test_hash_verify_uses_compare_digest(monkeypatch):
         return real(a, b)
 
     monkeypatch.setattr(credentials.hmac, "compare_digest", spy)
-    stored = credentials.hash_password("pw-pw-pw-pw-pw-pw")
-    assert credentials.verify_password("pw-pw-pw-pw-pw-pw", stored)
+    pw = fake_password()
+    stored = credentials.hash_password(pw)
+    assert credentials.verify_password(pw, stored)
     assert len(calls) == 1
 
 
@@ -265,9 +271,10 @@ async def test_hash_stored_per_endpoint_salt_never_password(conn):
 
 
 def test_hash_credentials_and_input_repr_hide_password():
-    assert "s3cret-s3cret-s3cret" not in repr(Credentials("u", "s3cret-s3cret-s3cret"))
-    data = EndpointIn(type="github-pr", preset_id="p", password="s3cret-s3cret-s3cret")
-    assert "s3cret-s3cret-s3cret" not in repr(data)
+    pw = fake_password()
+    assert pw not in repr(Credentials("u", pw))
+    data = EndpointIn(type="github-pr", preset_id="p", password=pw)
+    assert pw not in repr(data)
 
 
 # --- parse_basic ----------------------------------------------------------------------------

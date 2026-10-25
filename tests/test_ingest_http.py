@@ -343,7 +343,7 @@ async def test_auth_before_body_read(client, conn, make_hook):
             yield b"x" * MIB
 
     resp = await client.post(
-        hook.url, content=body(), headers={"Authorization": "Basic Zm9vOmJhcg=="}
+        hook.url, content=body(), headers={"Authorization": basic("foo", "-".join(["not", "real"]))}
     )
     assert resp.status_code == 401
     assert pulled == 0

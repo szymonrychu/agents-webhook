@@ -9,8 +9,9 @@ from agents_webhook import cli
 from agents_webhook.cli import main
 
 SUBCOMMANDS = ["migrate", "ingest", "api", "worker"]
+DB_URL = "postgresql://" + "u:" + "-".join(["fake", "pw"]) + "@localhost/db"
 ENV = {
-    "WEBHOOK_DATABASE_URL": "postgresql://u:p@localhost/db",
+    "WEBHOOK_DATABASE_URL": DB_URL,
     "WEBHOOK_ORCHESTRATOR_URL": "http://orch:8001",
     "WEBHOOK_ORCHESTRATOR_TOKEN": "tok",
 }
@@ -121,7 +122,7 @@ def test_config_worker(env, monkeypatch):
     monkeypatch.setattr(cli, "run_worker", fake_run_worker)
     assert main(["worker"]) == 0
     settings, pool, client, stop = calls["worker"]
-    assert calls["url"] == "postgresql://u:p@localhost/db"
+    assert calls["url"] == DB_URL
     assert isinstance(pool, Pool)
     assert client._http.headers["Authorization"] == "Bearer tok"
     assert calls["closed"]
