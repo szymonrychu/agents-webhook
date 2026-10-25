@@ -564,3 +564,59 @@ async def test_record_round_trips_normalized_event(conn, ep):
     r = await rec(conn, ep, original)
     rebuilt = events.to_normalized(await events.get_event(conn, r.id))
     assert rebuilt == original
+
+
+# --- ignored payload cap --------------------------------------------------------------------
+
+HUGE = {"blob": "x" * 20000}
+
+
+def _assert_truncated(row) -> None:
+    assert row.payload["truncated"] is True
+    assert row.payload["size"] > 20000
+    assert row.payload["head"].startswith('{"blob"') and len(row.payload["head"]) == 4096
+
+
+async def test_ignored_rows_store_truncated_payload(conn, store, ep, make_endpoint):
+    # ignore_reason paths (type mismatch, unsupported, action ignored, ...)
+    r = await rec(conn, ep, ev("k0", title="kept"), HUGE, ignore_reason="type_mismatch")
+    row = await events.get_event(conn, r.id)
+    _assert_truncated(row)
+    assert row.title == "kept" and row.reason == "type_mismatch"
+    # a small ignored payload is kept as is
+    small = await rec(conn, ep, ev("ks"), {"p": 1}, ignore_reason="action_ignored")
+    assert (await events.get_event(conn, small.id)).payload == {"p": 1}
+    # redelivery
+    first = await rec(conn, ep, ev("k1", delivery_id="d1"), HUGE)
+    again = await rec(conn, ep, ev("k1", delivery_id="d1"), HUGE)
+    assert again.reason == "duplicate"
+    _assert_truncated(await events.get_event(conn, again.id))
+    # new rows keep the full payload
+    assert (await events.get_event(conn, first.id)).payload == HUGE
+    # same-key duplicate (latest wins): the new row keeps it, the ignored one is capped
+    await rec(conn, ep, ev("k2"), HUGE)
+    dup = await rec(conn, ep, ev("k2"), HUGE)
+    assert dup.reason == "duplicate"
+    _assert_truncated(await events.get_event(conn, dup.id))
+    # queue_full
+    full = await rec(conn, ep, ev("k3"), HUGE, max_queue=1)
+    assert full.reason == "queue_full"
+    _assert_truncated(await events.get_event(conn, full.id))
+    # endpoint removed
+    other = await make_endpoint()
+    gone = await rec(conn, other, ev("k4"), HUGE)
+    assert (await events.get_event(conn, gone.id)).payload == HUGE
+    assert await endpoints.delete(conn, other.id)
+    while await claim(conn):
+        pass
+    row = await events.get_event(conn, gone.id)
+    assert row.reason == "endpoint_removed"
+    _assert_truncated(row)
+    # release folds a newer new row in: the folded duplicate is capped
+    keep = await rec(conn, ep, ev("k5"), {"v": 1})
+    while (await claim(conn, reuse={ep.id})).event.id != keep.id:
+        pass
+    newer = await rec(conn, ep, ev("k5"), HUGE)
+    assert await events.release(conn, keep.id)
+    assert (await events.get_event(conn, keep.id)).payload == HUGE
+    _assert_truncated(await events.get_event(conn, newer.id))

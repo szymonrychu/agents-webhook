@@ -8,6 +8,7 @@ status moves go through `agents_common.db.transition`, and claims use
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,13 @@ _COLUMNS = (
     "delivery_id, "
     "dedup_key, status, reason, preset_id, prompt_template, update_of, duplicate_of, deliveries, "
     "cluster_id, cluster_slug, message_id, started_at, finished_at"
+)
+# Ignored rows keep at most this much of a payload; only `new` rows keep it whole.
+IGNORED_PAYLOAD_CAP = 4096
+_CAP_IGNORED_SQL = (
+    "UPDATE events SET payload = jsonb_build_object('truncated', true, "
+    "'size', octet_length(payload::text), 'head', left(payload::text, %(cap)s)) "
+    "WHERE id = %(id)s AND status = 'ignored' AND octet_length(payload::text) > %(cap)s"
 )
 # Columns latest-wins copies from a newer delivery of the same key onto the `new` row.
 _LATEST = ("action", "title", "body", "comment_body", "url", "author", "actor", "labels", "payload")
@@ -128,6 +136,20 @@ def _values(endpoint: Endpoint, event: NormalizedEvent, payload: Any) -> dict[st
     }
 
 
+def cap_payload(payload: Any) -> Any:
+    """`payload` as stored on an ignored row: whole when small, else a truncated stand-in."""
+    text = json.dumps(payload, ensure_ascii=False)
+    size = len(text.encode())
+    if size <= IGNORED_PAYLOAD_CAP:
+        return payload
+    return {"truncated": True, "size": size, "head": text[:IGNORED_PAYLOAD_CAP]}
+
+
+async def _cap_ignored(conn: psycopg.AsyncConnection, id: int) -> None:
+    """Truncate the payload of a row that just became ignored."""
+    await conn.execute(_CAP_IGNORED_SQL, {"id": id, "cap": IGNORED_PAYLOAD_CAP})
+
+
 def _insert_sql(values: dict[str, Any], tail: str = "") -> str:
     cols = ", ".join([*values, "status", "reason", "duplicate_of"])
     params = ", ".join(f"%({c})s" for c in [*values, "status", "reason", "duplicate_of"])
@@ -142,6 +164,8 @@ async def _insert(
     duplicate_of: int | None = None,
 ) -> Recorded:
     params = {**values, "status": status, "reason": reason, "duplicate_of": duplicate_of}
+    if status == "ignored":
+        params["payload"] = Jsonb(cap_payload(values["payload"].obj))
     cur = await conn.execute(_insert_sql(values), params)
     row = await cur.fetchone()
     assert row is not None
@@ -274,6 +298,7 @@ async def claim_next(
                 await transition(
                     conn, "events", row["id"], "new", "ignored", reason="endpoint_removed"
                 )
+                await _cap_ignored(conn, row["id"])
                 continue
             if not await transition(
                 conn, "events", row["id"], "new", "in-progress", started_at=row["now"]
@@ -355,6 +380,8 @@ async def release(conn: psycopg.AsyncConnection, id: int) -> bool:
             + "r.id = %(id)s AND r.status = 'in-progress'",
             {"id": id, "newer": newer},
         )
+        if newer is not None:
+            await _cap_ignored(conn, newer)
         return cur.rowcount == 1
 
 
