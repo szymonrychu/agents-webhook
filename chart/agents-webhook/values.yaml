@@ -29,6 +29,14 @@ publicBaseUrl: https://lab.szymonrichert.pl
 # CIDRs of reverse proxies whose X-Forwarded-For is trusted (WEBHOOK_TRUSTED_PROXIES).
 trustedProxies: []
 
+# Source allowlist of the api (WEBHOOK_API_ALLOWED_CIDRS, api pod only): the direct peer must be
+# inside one of these CIDRs or the api answers 403 (probes excepted). The default admits only
+# the oauth2-proxy sidecar on localhost, so in-cluster pods cannot skip SSO via the
+# http-insecure Service port.
+api:
+  allowedCidrs:
+    - 127.0.0.1/32
+
 # Limits, rendered into the settings ConfigMap read by ingest and worker.
 limits:
   # WEBHOOK_MAX_IN_PROGRESS: events running at once, across all endpoints.

@@ -112,6 +112,10 @@ env:
       secretKeyRef:
         name: {{ include "agents-webhook.databaseSecretName" .context }}
         key: {{ include "agents-webhook.databaseSecretKey" .context }}
+{{- if eq .component "api" }}
+  - name: WEBHOOK_API_ALLOWED_CIDRS
+    value: {{ join "," (.context.Values.api.allowedCidrs | default (list "127.0.0.1/32")) | quote }}
+{{- end }}
 {{- if has .component (list "api" "worker") }}
   - name: WEBHOOK_ORCHESTRATOR_TOKEN
     valueFrom:

@@ -32,6 +32,7 @@ Every setting is an environment variable. The first block is read by all subcomm
 | `WEBHOOK_POLL_SECONDS` | 5 | worker tick when no NOTIFY arrives |
 | `WEBHOOK_EVENTS_RETENTION_DAYS` | 30 | the worker deletes handled, ignored and failed events idle longer than this, hourly, in batches of 1000 |
 | `WEBHOOK_AUTH_FAILURES_PER_MINUTE` | 10 | failed authentications per client per minute before 429 |
+| `WEBHOOK_API_ALLOWED_CIDRS` | `127.0.0.1/32` | comma-separated CIDRs the api accepts as direct peer address (403 otherwise, `/healthz` and `/readyz` excepted; `X-Forwarded-For` is never read). The default admits only the oauth2-proxy sidecar |
 | `WEBHOOK_TRUSTED_PROXIES` | empty | comma-separated CIDRs whose `X-Forwarded-For` is trusted |
 | `WEBHOOK_MIN_PASSWORD_LENGTH` | 16 | shortest accepted caller-chosen password |
 | `WEBHOOK_TEMPLATE_TIMEOUT_SECONDS` | 2.0 | per-render time limit for prompt templates |
@@ -126,7 +127,7 @@ Invalid settings exit with code 78, naming every bad variable.
 
 ## Helm chart
 
-`chart/agents-webhook` deploys the `ingest` (2 replicas), `api` and `worker` Deployments from one image, the settings ConfigMap, a Secret and a Service. Required values: `image.tag`, `orchestrator.url` with `orchestrator.token` or `orchestrator.tokenSecret`, and exactly one of `postgres.url` and `postgres.existingSecret`. `limits.*` render the limit variables above; `publicBaseUrl` and `trustedProxies` render `WEBHOOK_PUBLIC_BASE_URL` and `WEBHOOK_TRUSTED_PROXIES`; `env` adds extra `WEBHOOK_*` settings. With `ingress.enabled` there are two Ingresses on one host: `/webhooks/api` (put SSO annotations in `ingress.annotations`) and `/webhook` (public; `ingress.ingestAnnotations`, body limit `ingress.proxyBodySize`, keep it at or above `limits.maxBodyBytes`). Each pod runs `migrate` as an init container.
+`chart/agents-webhook` deploys the `ingest` (2 replicas), `api` and `worker` Deployments from one image, the settings ConfigMap, a Secret and a Service. Required values: `image.tag`, `orchestrator.url` with `orchestrator.token` or `orchestrator.tokenSecret`, and exactly one of `postgres.url` and `postgres.existingSecret`. `limits.*` render the limit variables above; `publicBaseUrl` and `trustedProxies` render `WEBHOOK_PUBLIC_BASE_URL` and `WEBHOOK_TRUSTED_PROXIES`; `api.allowedCidrs` renders `WEBHOOK_API_ALLOWED_CIDRS` on the api pod only (default `127.0.0.1/32`, so the SSO sidecar is the only caller; the sidecar's `http-insecure` Service port is otherwise open to every in-cluster pod); `env` adds extra `WEBHOOK_*` settings. With `ingress.enabled` there are two Ingresses on one host: `/webhooks/api` (put SSO annotations in `ingress.annotations`) and `/webhook` (public; `ingress.ingestAnnotations`, body limit `ingress.proxyBodySize`, keep it at or above `limits.maxBodyBytes`). Each pod runs `migrate` as an init container.
 
 ## Development
 
