@@ -8,8 +8,10 @@ from agents_webhook.filters import (
     EMPTY,
     FIELDS,
     MATCHES,
+    MAX_LIST_ITEMS,
     MAX_RULES,
     MAX_TEXT,
+    MAX_TOTAL_VALUES,
     MAX_VALUE_LENGTH,
     MAX_VALUES,
     NOT_ALLOWED,
@@ -366,3 +368,27 @@ def test_catastrophic_pattern_is_linear():
     # The literal input is longer than MAX_TEXT, so the deny regex fails closed.
     assert literal_result == "filter_denied: body"
     assert in_window_result is None
+
+
+def test_total_values_budget():
+    assert MAX_TOTAL_VALUES == 200
+    full = [_rule("author", *[f"u{r}-{i}" for i in range(MAX_VALUES)]) for r in range(4)]
+    assert len(validate("github-pr", {"allow": full[:2], "deny": full[2:]})["deny"]) == 2
+    with pytest.raises(ValueError, match=r"^filters\.deny\[1\]: .*200"):
+        validate("github-pr", {"allow": full[:3], "deny": [full[3], _rule("author", "extra")]})
+    with pytest.raises(ValueError, match=r"^filters\.allow\[4\]: .*200"):
+        validate("github-pr", {"allow": [*full, _rule("author", "extra")]})
+
+
+def test_oversized_list_fails_closed():
+    assert MAX_LIST_ITEMS == 100
+    long = replace(PR, labels=[f"l{i}" for i in range(MAX_LIST_ITEMS + 1)])
+    ok = replace(PR, labels=[f"l{i}" for i in range(MAX_LIST_ITEMS)])
+    regex = "regex"
+    assert _run(ok, deny=[_rule("labels", "^l99$", match=regex)]) == "filter_denied: labels"
+    assert _run(ok, allow=[_rule("labels", "^l99$", match=regex)]) is None
+    # Past the cap even a matching element cannot satisfy allow, and any rule trips deny.
+    assert _run(long, allow=[_rule("labels", "^l0$", match=regex)]) == "filter_not_allowed: labels"
+    assert _run(long, deny=[_rule("labels", "^nomatch$", match=regex)]) == "filter_denied: labels"
+    assert _run(long, allow=[_rule("labels", "l0")]) == "filter_not_allowed: labels"
+    assert _run(long, deny=[_rule("labels", "nomatch")]) == "filter_denied: labels"

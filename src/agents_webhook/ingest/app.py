@@ -11,6 +11,7 @@ Logs carry the endpoint id, event id, status, reason and client key; never the s
 failed request, the body, the Authorization header or a password.
 """
 
+import asyncio
 import json
 import logging
 import math
@@ -102,6 +103,13 @@ def verdict(
         return FILTER_ERROR
 
 
+async def async_verdict(
+    event: NormalizedEvent, rules: dict[str, Any], settings: WebhookSettings, context: str
+) -> str | None:
+    """`verdict` in a worker thread, so a large rule set cannot stall the event loop."""
+    return await asyncio.to_thread(verdict, event, rules, settings, context)
+
+
 class _TooLarge(Exception):
     pass
 
@@ -184,7 +192,7 @@ def create_ingest_app(settings: WebhookSettings, pool: AsyncConnectionPool) -> F
             return _error(400, "bad_request")
         try:
             event = normalize(endpoint.type, headers, payload)
-            reason = verdict(
+            reason = await async_verdict(
                 event, endpoint.filters, settings, f"endpoint={endpoint.id} client={client}"
             )
         except TypeMismatch:
