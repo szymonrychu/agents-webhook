@@ -284,12 +284,50 @@ def test_regex_search_semantics():
     assert _run(PR, deny=[_rule("labels", "^bug$", match=regex)]) is None
     assert _run(PR, deny=[_rule("author", "^Ali", match=regex)]) == "filter_denied: author"
 
+    # A text of exactly MAX_TEXT characters is searched whole.
     inside = replace(PR, body="x" * (MAX_TEXT - len("needle")) + "needle")
-    beyond = replace(PR, body="x" * MAX_TEXT + "needle")
     needle = _rule("body", "needle", match=regex)
     assert _run(inside, deny=[needle]) == "filter_denied: body"
-    assert _run(beyond, deny=[needle]) is None
-    assert _run(beyond, deny=[_rule("body", "^x*$", match=regex)]) == "filter_denied: body"
+    assert _run(inside, allow=[_rule("body", "needle$", match=regex)]) is None
+    assert _run(inside, deny=[_rule("body", "^x*$", match=regex)]) is None
+
+
+def test_oversized_text_fails_closed():
+    regex = "regex"
+    oversized = replace(PR, body="x" * (MAX_TEXT + 1), title="t" * (MAX_TEXT + 1))
+    # An allow regex never passes a text longer than the window, even one it would match.
+    assert _run(oversized, allow=[_rule("body", "x", match=regex)]) == "filter_not_allowed: body"
+    # A deny regex always trips on it, even one it would not match.
+    assert _run(oversized, deny=[_rule("body", "needle", match=regex)]) == "filter_denied: body"
+    # Padding a denied word past the window does not get it through.
+    padded = replace(PR, body="x" * MAX_TEXT + "forbidden")
+    assert _run(padded, deny=[_rule("body", "forbidden", match=regex)]) == "filter_denied: body"
+    # An end-anchored allow regex cannot match at the cut point.
+    cut = replace(PR, body="a" * (MAX_TEXT - 1) + "x" + "tail")
+    assert _run(cut, allow=[_rule("body", "x$", match=regex)]) == "filter_not_allowed: body"
+    # Equals compares whole values, so an oversized text neither equals nor trips anything.
+    assert _run(oversized, deny=[_rule("title", "t" * MAX_VALUE_LENGTH)]) is None
+    assert _run(oversized, allow=[_rule("title", "t" * MAX_VALUE_LENGTH)]) == (
+        "filter_not_allowed: title"
+    )
+    # List and label elements fail closed per element.
+    long_label = "l" * (MAX_TEXT + 1)
+    labelled = replace(PR, labels=["Bug", long_label])
+    assert _run(labelled, deny=[_rule("labels", "^nothing$", match=regex)]) == (
+        "filter_denied: labels"
+    )
+    assert _run(labelled, allow=[_rule("labels", "^Bug$", match=regex)]) is None
+    assert _run(replace(PR, labels=[long_label]), allow=[_rule("labels", "l", match=regex)]) == (
+        "filter_not_allowed: labels"
+    )
+    alert = replace(ALERT, labels={"env": long_label})
+    assert _run(alert, deny=[_rule("labels", "env=^prod$", match=regex)]) == (
+        "filter_denied: labels"
+    )
+    assert _run(alert, allow=[_rule("labels", "env=l", match=regex)]) == (
+        "filter_not_allowed: labels"
+    )
+    assert _run(alert, deny=[_rule("labels", "team=.*", match=regex)]) is None
 
 
 def test_grafana_label_rules():
@@ -318,13 +356,13 @@ def test_grafana_label_rules():
 def test_catastrophic_pattern_is_linear():
     catastrophic = validate("github-pr", {"deny": [_rule("body", "(a+)+$", match="regex")]})
     literal = replace(PR, body="a" * 100_000 + "!")
-    # The failing '!' inside the read window: a backtracking engine never returns on this one.
+    # The failing '!' inside the window: a backtracking engine never returns on this one.
     in_window = replace(PR, body="a" * (MAX_TEXT - 1) + "!")
     started = time.monotonic()
     literal_result = evaluate(literal, catastrophic)
     in_window_result = evaluate(in_window, catastrophic)
     elapsed = time.monotonic() - started
     assert elapsed < 1.0
-    # Only the first MAX_TEXT characters are read, so the literal input is all 'a' there.
+    # The literal input is longer than MAX_TEXT, so the deny regex fails closed.
     assert literal_result == "filter_denied: body"
     assert in_window_result is None

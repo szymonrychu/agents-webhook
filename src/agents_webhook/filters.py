@@ -7,6 +7,11 @@ rule path. `evaluate` returns the ignore reason for an event or None.
 User regexes compile with RE2 (the `google-re2` package, module `re2`): matching is linear in
 the input and backreferences and lookaround are refused at compile time, so no pattern can
 backtrack catastrophically on the public ingest path. stdlib `re` never sees a user pattern.
+
+A regex reads at most `MAX_TEXT` characters of a field (each list element, each Grafana label
+value). A longer text fails closed instead of being cut: a regex rule on it never satisfies an
+allow rule and always trips a deny rule, so padding cannot push denied content past the window
+and an end anchor cannot match at a cut point. `equals` compares whole values and is unaffected.
 """
 
 import json
@@ -55,8 +60,12 @@ def _compile(pattern: str) -> Any:
     return re2.compile(pattern, options=options)
 
 
-def _read(text: str) -> str:
-    return text[:MAX_TEXT]
+def _regex_matcher(patterns: list[str], oversized: bool) -> Callable[[str], bool]:
+    """Search for any pattern; a text longer than MAX_TEXT yields `oversized` (fail closed)."""
+    compiled = [_compile(pattern) for pattern in patterns]
+    return lambda text: (
+        oversized if len(text) > MAX_TEXT else any(p.search(text) is not None for p in compiled)
+    )
 
 
 def _grafana_label(value: str) -> tuple[str, str] | None:
@@ -143,26 +152,28 @@ class _Rule:
     matches: Callable[[Any], bool]
 
 
-def _text_matcher(field: str, match: str, values: list[str]) -> Callable[[str], bool]:
+def _text_matcher(
+    field: str, match: str, values: list[str], oversized: bool
+) -> Callable[[str], bool]:
     if match == "regex":
-        patterns = [_compile(value) for value in values]
-        return lambda text: any(p.search(_read(text)) is not None for p in patterns)
+        return _regex_matcher(values, oversized)
     if field in _CASEFOLDED:
         folded = frozenset(value.casefold() for value in values)
-        return lambda text: _read(text).casefold() in folded
+        return lambda text: text.casefold() in folded
     exact = frozenset(values)
-    return lambda text: _read(text) in exact
+    return lambda text: text in exact
 
 
-def _grafana_labels_matcher(match: str, values: list[str]) -> Callable[[Any], bool]:
+def _grafana_labels_matcher(
+    match: str, values: list[str], oversized: bool
+) -> Callable[[Any], bool]:
     tests: list[tuple[str, Callable[[str], bool]]] = []
     for value in values:
         key, _, expected = value.partition("=")
         if match == "regex":
-            pattern = _compile(expected)
-            tests.append((key, lambda text, p=pattern: p.search(_read(text)) is not None))
+            tests.append((key, _regex_matcher([expected], oversized)))
         else:
-            tests.append((key, lambda text, e=expected: _read(text) == e))
+            tests.append((key, lambda text, e=expected: text == e))
 
     def matches(labels: Any) -> bool:
         if not isinstance(labels, Mapping):
@@ -183,20 +194,21 @@ def _field_matcher(text_matches: Callable[[str], bool]) -> Callable[[Any], bool]
     return matches
 
 
-def _build_rule(endpoint_type: str, rule: Mapping[str, Any]) -> _Rule:
+def _build_rule(endpoint_type: str, rule: Mapping[str, Any], deny: bool) -> _Rule:
+    """`deny` is the outcome of a regex on oversized text: a match for deny, none for allow."""
     field, match, values = rule["field"], rule["match"], rule["values"]
     if endpoint_type == _GRAFANA and field == "labels":
-        matches = _grafana_labels_matcher(match, values)
+        matches = _grafana_labels_matcher(match, values, deny)
     else:
-        matches = _field_matcher(_text_matcher(field, match, values))
+        matches = _field_matcher(_text_matcher(field, match, values, deny))
     return _Rule(field, _ATTRIBUTES.get(field, field), matches)
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
 def _rule_set(endpoint_type: str, key: str) -> tuple[tuple[_Rule, ...], tuple[_Rule, ...]]:
     canonical = validate(endpoint_type, json.loads(key))
-    allow = tuple(_build_rule(endpoint_type, rule) for rule in canonical["allow"])
-    deny = tuple(_build_rule(endpoint_type, rule) for rule in canonical["deny"])
+    allow = tuple(_build_rule(endpoint_type, rule, False) for rule in canonical["allow"])
+    deny = tuple(_build_rule(endpoint_type, rule, True) for rule in canonical["deny"])
     return allow, deny
 
 

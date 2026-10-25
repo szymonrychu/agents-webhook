@@ -68,6 +68,18 @@ Configure the sender with the endpoint URL and its credentials:
 - GitLab: Settings, Webhooks. URL `https://<username>:<password>@lab.szymonrichert.pl/webhook/<suffix>`; tick issue, merge request and comment events as the type needs. Leave the secret token empty.
 - Grafana: Alerting, Contact points, new contact point of type Webhook. URL `https://lab.szymonrichert.pl/webhook/<suffix>`, set the basic auth Username and Password fields.
 
+## Filters
+
+Each endpoint carries `filters = {"allow": [Rule], "deny": [Rule]}` with `Rule = {"field", "match", "values"}`; `match` is `equals` (the default) or `regex`. Empty lists accept every event.
+
+- Order: the first deny rule (in list order) that matches ignores the event with `filter_denied: <field>`; otherwise the first allow rule that does not match ignores it with `filter_not_allowed: <field>`. Allow rules combine with AND, the values within one rule with OR.
+- Fields per type: `github-issue` and `gitlab-issue` offer `author`, `actor`, `repo`, `labels`, `title`, `body`, `comment`, `kind`, `action`; `github-pr` and `gitlab-mr` add `source_branch` and `target_branch`; `grafana-alert` offers `labels`, `title`, `body`. A field the event does not carry (for example `comment` on a non-comment event) never matches: it fails an allow rule and never trips a deny rule. A list field (forge `labels`) matches when any element matches.
+- `equals` compares whole values: case-insensitively for `author`, `actor`, `repo` and forge `labels`, exactly for every other field.
+- `regex` is an unanchored search; anchor with `^...$`, use `(?i)` for case-insensitivity. Patterns use RE2 syntax (the `google-re2` engine): matching takes time linear in the text, and backreferences and lookaround are refused when the filters are saved.
+- Grafana `labels` values are `key=value` (split on the first `=`, non-empty key) and match the alert group's common labels: `equals` compares the label's value exactly, `regex` searches it with the part after `=`. A key the alert group does not carry never matches.
+- Window: a regex reads at most 65536 characters of a field (of each list element, of each label value). A longer text fails closed instead of being cut: a regex rule on it never satisfies an allow rule and always trips a deny rule, so padding cannot push denied content past the window and an end anchor cannot match at a cut point. `equals` rules are unaffected.
+- Bounds, checked on save: at most 20 rules per list, 1 to 50 values per rule, each value 1 to 256 characters.
+
 ## Agent reuse
 
 Each agent preset has a boolean `reuse_running_agent`, off by default. When it is on for an endpoint's preset, events about the same item (the same repository and issue or merge request number, or the same alert group, which is the event's dedup key on that endpoint) go to the agent already working on that item:
