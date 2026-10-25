@@ -5,3 +5,9 @@ postgres:
 orchestrator:
   url: http://agent-orchestrator.agents.svc
   token: lint-token
+ingress:
+  enabled: true
+  className: nginx
+  host: webhook.example.test
+  tls:
+    secretName: webhook-example-tls

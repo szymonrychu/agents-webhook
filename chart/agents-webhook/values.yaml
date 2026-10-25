@@ -66,8 +66,26 @@ service:
   type: ClusterIP
   port: 80
 
+# Two Ingresses on one host: <fullname>-api at /webhooks/api (put SSO annotations in
+# `annotations`) and <fullname>-ingest at /webhook, public and outside SSO. Set
+# cert-manager.io/cluster-issuer in annotations/ingestAnnotations only when this release owns
+# the host's certificate.
 ingress:
   enabled: false
+  className: ""
+  host: ""
+  tls:
+    secretName: ""
+  # Annotations for the api Ingress.
+  annotations: {}
+  # Source CIDRs the api Ingress refuses (ingress-nginx denylist; list the cluster node IPs).
+  denySourceRanges: []
+  # Annotations for the ingest Ingress only.
+  ingestAnnotations: {}
+  # Ingest Ingress limits: body size must be >= limits.maxBodyBytes (5 MiB).
+  proxyBodySize: 5m
+  proxyReadTimeout: "60"
+  proxySendTimeout: "60"
 
 podSecurityContext:
   runAsNonRoot: true
