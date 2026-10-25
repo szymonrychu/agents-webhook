@@ -12,6 +12,13 @@ A regex reads at most `MAX_TEXT` characters of a field (each list element, each 
 value). A longer text fails closed instead of being cut: a regex rule on it never satisfies an
 allow rule and always trips a deny rule, so padding cannot push denied content past the window
 and an end anchor cannot match at a cut point. `equals` compares whole values and is unaffected.
+
+Two more bounds keep one delivery cheap: `validate` refuses more than `MAX_TOTAL_VALUES` (200)
+values summed across all allow and deny rules of an endpoint (the error carries the path of
+the rule that crosses it), and a list field (forge labels) is read for at most `MAX_LIST_ITEMS`
+(100) elements. A longer list fails closed like an oversized text: a regex or equals rule on
+it never satisfies an allow rule and always trips a deny rule. Callers on an event loop run
+`evaluate` in a worker thread (compiling on a cache miss is not free).
 """
 
 import json
@@ -43,6 +50,8 @@ MAX_RULES = 20
 MAX_VALUES = 50
 MAX_VALUE_LENGTH = 256
 MAX_TEXT = 65536
+MAX_TOTAL_VALUES = 200
+MAX_LIST_ITEMS = 100
 
 _LISTS = ("allow", "deny")
 _RULE_KEYS = ("field", "match", "values")
@@ -96,7 +105,8 @@ def _validate_value(endpoint_type: str, field: str, match: str, value: Any, path
             raise ValueError(f"{path}: not a valid RE2 pattern ({detail})") from None
 
 
-def _validate_rule(endpoint_type: str, rule: Any, path: str) -> dict[str, Any]:
+def _validate_rule(endpoint_type: str, rule: Any, path: str, budget: int) -> dict[str, Any]:
+    """`budget` is the number of values the endpoint may still add."""
     if not isinstance(rule, Mapping):
         raise ValueError(f"{path}: must be an object")
     for key in rule:
@@ -115,6 +125,8 @@ def _validate_rule(endpoint_type: str, rule: Any, path: str) -> dict[str, Any]:
     values = rule.get("values")
     if not isinstance(values, list) or not 1 <= len(values) <= MAX_VALUES:
         raise ValueError(f"{path}.values: must be a list of 1 to {MAX_VALUES} strings")
+    if len(values) > budget:
+        raise ValueError(f"{path}: at most {MAX_TOTAL_VALUES} values in total across all rules")
     for index, value in enumerate(values):
         _validate_value(endpoint_type, field, match, value, f"{path}.values[{index}]")
     return {"field": field, "match": match, "values": list(values)}
@@ -130,6 +142,7 @@ def validate(endpoint_type: str, data: Any) -> dict:
         if key not in _LISTS:
             raise ValueError(f"filters.{key}: unknown key")
     canonical: dict[str, list[dict[str, Any]]] = {}
+    budget = MAX_TOTAL_VALUES
     for name in _LISTS:
         rules = data.get(name)
         if rules is None:
@@ -138,10 +151,11 @@ def validate(endpoint_type: str, data: Any) -> dict:
             raise ValueError(f"filters.{name}: must be a list")
         if len(rules) > MAX_RULES:
             raise ValueError(f"filters.{name}: at most {MAX_RULES} rules")
-        canonical[name] = [
-            _validate_rule(endpoint_type, rule, f"filters.{name}[{index}]")
-            for index, rule in enumerate(rules)
-        ]
+        canonical[name] = []
+        for index, rule in enumerate(rules):
+            checked = _validate_rule(endpoint_type, rule, f"filters.{name}[{index}]", budget)
+            budget -= len(checked["values"])
+            canonical[name].append(checked)
     return canonical
 
 
@@ -183,11 +197,15 @@ def _grafana_labels_matcher(
     return matches
 
 
-def _field_matcher(text_matches: Callable[[str], bool]) -> Callable[[Any], bool]:
+def _field_matcher(text_matches: Callable[[str], bool], overlong: bool) -> Callable[[Any], bool]:
+    """`overlong` is the outcome for a list past MAX_LIST_ITEMS (fail closed)."""
+
     def matches(value: Any) -> bool:
         if isinstance(value, str):
             return text_matches(value)
         if isinstance(value, list | tuple):  # forge labels: any element
+            if len(value) > MAX_LIST_ITEMS:
+                return overlong
             return any(isinstance(item, str) and text_matches(item) for item in value)
         return False  # absent (None) never matches
 
@@ -200,7 +218,7 @@ def _build_rule(endpoint_type: str, rule: Mapping[str, Any], deny: bool) -> _Rul
     if endpoint_type == _GRAFANA and field == "labels":
         matches = _grafana_labels_matcher(match, values, deny)
     else:
-        matches = _field_matcher(_text_matcher(field, match, values, deny))
+        matches = _field_matcher(_text_matcher(field, match, values, deny), deny)
     return _Rule(field, _ATTRIBUTES.get(field, field), matches)
 
 

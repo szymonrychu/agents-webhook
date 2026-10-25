@@ -281,6 +281,28 @@ async def test_filters_never_run_before_auth(client, conn, make_hook, monkeypatc
     assert calls == []
 
 
+async def test_filter_verdict_runs_off_event_loop(client, conn, make_hook, monkeypatch):
+    import threading
+
+    threads = []
+
+    def spy(*_a):
+        threads.append(threading.current_thread())
+
+    monkeypatch.setattr(ingest_app.filters, "evaluate", spy)
+    hook = await make_hook("github-pr", filters=FILTER_DENY)
+    resp = await post(client, hook, p.gh_headers("pull_request"), p.gh_pull_request())
+    assert resp.status_code == 202
+    assert threads
+    assert all(t is not threading.main_thread() for t in threads)
+    # The preview route shares the same awaitable verdict.
+    threads.clear()
+    event = ingest_app.normalize("github-pr", p.gh_headers("pull_request"), p.gh_pull_request())
+    await ingest_app.async_verdict(event, FILTER_DENY, make_settings(), "test")
+    assert threads
+    assert all(t is not threading.main_thread() for t in threads)
+
+
 async def test_filter_error_never_crashes_ingest(client, conn, make_hook, monkeypatch):
     def boom(*_a):
         raise RuntimeError("secret rule text")

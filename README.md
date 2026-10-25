@@ -80,7 +80,9 @@ An author allowlist is an endpoint `allow` rule on `author` (for example `{"fiel
 - `regex` is an unanchored search; anchor with `^...$`, use `(?i)` for case-insensitivity. Patterns use RE2 syntax (the `google-re2` engine): matching takes time linear in the text, and backreferences and lookaround are refused when the filters are saved.
 - Grafana `labels` values are `key=value` (split on the first `=`, non-empty key) and match the alert group's common labels: `equals` compares the label's value exactly, `regex` searches it with the part after `=`. A key the alert group does not carry never matches.
 - Window: a regex reads at most 65536 characters of a field (of each list element, of each label value). A longer text fails closed instead of being cut: a regex rule on it never satisfies an allow rule and always trips a deny rule, so padding cannot push denied content past the window and an end anchor cannot match at a cut point. `equals` rules are unaffected.
-- Bounds, checked on save: at most 20 rules per list, 1 to 50 values per rule, each value 1 to 256 characters.
+- Bounds, checked on save: at most 20 rules per list, 1 to 50 values per rule, each value 1 to 256 characters, and at most 200 values in total across all allow and deny rules of an endpoint (`MAX_TOTAL_VALUES`; the error names the path of the rule that crosses it).
+- List cap: a list field (forge `labels`) is read for at most 100 elements (`MAX_LIST_ITEMS`). A longer list fails closed like an oversized text: a `regex` or `equals` rule on it never satisfies an allow rule and always trips a deny rule.
+- Evaluation (and the regex compile on a cache miss) runs in a worker thread in ingest and in the preview route, so a large rule set cannot stall the event loop.
 
 ## Agent reuse
 
