@@ -10,18 +10,21 @@ import hmac
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 import psycopg
 from psycopg.rows import class_row
+from psycopg.types.json import Jsonb
 
-from agents_webhook import credentials
+from agents_webhook import credentials, filters
 
 TYPES = ("grafana-alert", "gitlab-issue", "gitlab-mr", "github-issue", "github-pr")
 SUFFIX_RE = re.compile(r"[A-Za-z0-9._~-]{1,128}")
 USERNAME_MAX = 64
 
 _COLUMNS = (
-    "id, suffix, type, preset_id, prompt_template, username, created_at, credentials_rotated_at"
+    "id, suffix, type, preset_id, prompt_template, username, created_at, "
+    "credentials_rotated_at, filters"
 )
 
 
@@ -35,6 +38,7 @@ class Endpoint:
     username: str
     created_at: datetime
     credentials_rotated_at: datetime | None
+    filters: dict
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,7 @@ class EndpointIn:
     username: str | None = None
     password: str | None = field(default=None, repr=False)
     prompt_template: str | None = None
+    filters: Any = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +115,7 @@ async def create(
         raise ValueError(f"type: must be one of {', '.join(TYPES)}")
     if not data.preset_id:
         raise ValueError("preset_id: required")
+    canonical = filters.EMPTY if data.filters is None else filters.validate(data.type, data.filters)
     suffix = credentials.generate_suffix() if data.suffix is None else _check_suffix(data.suffix)
     creds = _credentials(data.username, data.password, min_password_length)
     password_hash = await _hash(creds.password)
@@ -118,7 +124,7 @@ async def create(
             cur = conn.cursor(row_factory=class_row(Endpoint))
             await cur.execute(
                 "INSERT INTO endpoints (suffix, type, preset_id, prompt_template, username, "
-                f"password_hash) VALUES (%s, %s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
+                f"password_hash, filters) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
                 (
                     suffix,
                     data.type,
@@ -126,6 +132,7 @@ async def create(
                     data.prompt_template,
                     creds.username,
                     password_hash,
+                    Jsonb(canonical),
                 ),
             )
             endpoint = await cur.fetchone()
@@ -152,6 +159,25 @@ async def rotate(
         (creds.username, password_hash, id),
     )
     return creds if await cur.fetchone() else None
+
+
+async def set_filters(conn: psycopg.AsyncConnection, id: int, data: Any) -> Endpoint | None:
+    """Replace an endpoint's filters; None if it does not exist.
+
+    `data` is validated against the endpoint's own type; a ValueError writes nothing.
+    """
+    async with conn.transaction():
+        cur = await conn.execute("SELECT type FROM endpoints WHERE id = %s FOR UPDATE", (id,))
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        canonical = filters.validate(row[0], data)
+        cur = conn.cursor(row_factory=class_row(Endpoint))
+        await cur.execute(
+            f"UPDATE endpoints SET filters = %s WHERE id = %s RETURNING {_COLUMNS}",
+            (Jsonb(canonical), id),
+        )
+        return await cur.fetchone()
 
 
 def _digest(value: str) -> bytes:
