@@ -102,6 +102,84 @@ def test_grafana_resolved_is_ignored(stack: Stack):
     assert stack.event(resolved["id"])["reason"] == "resolved"
 
 
+# --- endpoint filters ------------------------------------------------------------------------
+
+
+def titled(title: str) -> dict:
+    payload = p.gh_pull_request()
+    payload["pull_request"]["title"] = title
+    return payload
+
+
+def test_deny_filter_ignores_and_others_run(stack: Stack):
+    ep = stack.create_endpoint(
+        "github-pr", filters={"deny": [{"field": "title", "values": ["WIP: not ready"]}]}
+    )
+    denied = accept(stack, ep, PR[0], titled("WIP: not ready"))
+    assert (denied["status"], denied["reason"]) == ("ignored", "filter_denied: title")
+    assert stack.event(denied["id"])["reason"] == "filter_denied: title"
+
+    ran = finish(stack, accept(stack, ep, PR[0], titled("Ship it"))["id"])
+    assert ran["status"] == "handled"
+    assert len([c for c in stack.fake.clusters.values() if c["slug"] == ran["cluster_slug"]]) == 1
+
+
+def test_allow_filter_ignores_stranger(stack: Stack):
+    ep = stack.create_endpoint(
+        "github-pr", filters={"allow": [{"field": "author", "values": ["alice"]}]}
+    )
+    stranger = p.gh_pull_request()
+    stranger["pull_request"]["user"] = {"login": "mallory"}
+    out = accept(stack, ep, PR[0], stranger)
+    assert (out["status"], out["reason"]) == ("ignored", "filter_not_allowed: author")
+    assert stack.event(out["id"])["reason"] == "filter_not_allowed: author"
+    finish(stack, accept(stack, ep, *PR)["id"])
+
+
+def test_put_filters_changes_the_outcome(stack: Stack):
+    ep = stack.create_endpoint(
+        "github-pr", filters={"deny": [{"field": "title", "values": ["Fix it"]}]}
+    )
+    first = accept(stack, ep, *PR)
+    assert (first["status"], first["reason"]) == ("ignored", "filter_denied: title")
+
+    r = stack.http.put(f"{stack.api}/endpoints/{ep['id']}/filters", json={"allow": [], "deny": []})
+    assert r.status_code == 200, r.text
+    assert r.json()["filters"] == {"allow": [], "deny": []}
+    finish(stack, accept(stack, ep, *PR)["id"])
+
+
+def test_grafana_label_deny(stack: Stack):
+    ep = stack.create_endpoint(
+        "grafana-alert", filters={"deny": [{"field": "labels", "values": ["env=staging"]}]}
+    )
+    staging = accept(
+        stack, ep, {}, p.grafana_alert(labels={"alertname": "HighCPU", "env": "staging"})
+    )
+    assert (staging["status"], staging["reason"]) == ("ignored", "filter_denied: labels")
+    prod = accept(
+        stack, ep, {}, p.grafana_alert(labels={"alertname": "HighCPU", "env": "production"})
+    )
+    assert prod["status"] == "new"
+    finish(stack, prod["id"])
+
+
+def test_preview_reports_filter_outcome(stack: Stack):
+    rules = {"allow": [{"field": "author", "values": ["alice"]}], "deny": []}
+    url = f"{stack.api}/templates/preview"
+    ok = stack.http.post(url, json={"type": "github-pr", "example": PR[1], "filters": rules})
+    assert ok.status_code == 200, ok.text
+    assert ok.json() == {"prompt": None, "filters": {"passed": True, "reason": None}}
+
+    denied = {"allow": [], "deny": [{"field": "title", "values": ["Fix it"]}]}
+    no = stack.http.post(url, json={"type": "github-pr", "example": PR[1], "filters": denied})
+    assert no.json()["filters"] == {"passed": False, "reason": "filter_denied: title"}
+
+    miss = {"allow": [{"field": "author", "values": ["bob"]}], "deny": []}
+    out = stack.http.post(url, json={"type": "github-pr", "example": PR[1], "filters": miss})
+    assert out.json()["filters"] == {"passed": False, "reason": "filter_not_allowed: author"}
+
+
 # --- templates ------------------------------------------------------------------------------
 
 TEMPLATE = "Service {{ (payload.pull_request.body | from_json).service }}: {{ title }}"
@@ -222,7 +300,9 @@ def test_reuse_off_starts_its_own_cluster(stack: Stack):
 
 def test_ignore_reasons_are_listed(stack: Stack, make_stack):
     ep = stack.create_endpoint("github-pr")
-    iss = stack.create_endpoint("github-issue")
+    iss = stack.create_endpoint(
+        "github-issue", filters={"allow": [{"field": "author", "values": ["alice", "bob"]}]}
+    )
     self_event = accept(stack, ep, PR[0], p.gh_pull_request(sender={"login": "botty"}))
     action = accept(stack, ep, PR[0], p.gh_pull_request("closed"))
     stranger = p.gh_issues()
@@ -232,7 +312,7 @@ def test_ignore_reasons_are_listed(stack: Stack, make_stack):
     expected = {
         self_event["id"]: "self_event",
         action["id"]: "action_ignored",
-        author["id"]: "author_not_allowed",
+        author["id"]: "filter_not_allowed: author",
     }
     for id, reason in expected.items():
         assert stack.event(id)["status"] == "ignored" and stack.event(id)["reason"] == reason
