@@ -520,3 +520,47 @@ async def test_list_events_newest_first_with_filters(conn, ep, make_endpoint):
 def test_event_has_every_column():
     names = {f.name for f in dataclasses.fields(events.Event)}
     assert {"id", "seq", "payload", "update_of", "duplicate_of", "finished_at"} <= names
+
+
+async def test_reuse_release_serialized_with_record_of_the_key(db, conn, ep, monkeypatch):
+    a = await rec(conn, ep, ev("k"), {"v": 1})
+    await claim(conn)
+    real = events._newer_new
+    ingest: list[asyncio.Task] = []
+
+    async def insert_between(c, id):
+        newer = await real(c, id)
+
+        async def deliver():
+            async with await psycopg.AsyncConnection.connect(db, autocommit=True) as w:
+                return await rec(w, ep, ev("k", title="late"), {"v": 2})
+
+        ingest.append(asyncio.create_task(deliver()))
+        await asyncio.wait(ingest, timeout=0.5)  # done here only if not serialized
+        return newer
+
+    monkeypatch.setattr(events, "_newer_new", insert_between)
+    assert await events.release(conn, a.id)
+    late = await ingest[0]
+    assert (late.status, late.reason, late.duplicate_of) == ("ignored", "duplicate", a.id)
+    row = await events.get_event(conn, a.id)
+    assert row.status == "new" and row.payload == {"v": 2} and row.title == "late"
+    assert row.deliveries == 2
+
+
+async def test_record_stores_body_and_latest_wins_replaces_it(conn, ep):
+    first = await rec(conn, ep, ev("k", body="b1", comment_body="c1"))
+    row = await events.get_event(conn, first.id)
+    assert (row.body, row.comment_body) == ("b1", "c1")
+    await rec(conn, ep, ev("k", body="b2", comment_body=None))
+    row = await events.get_event(conn, first.id)
+    assert (row.body, row.comment_body) == ("b2", None)
+    ign = await rec(conn, ep, ev("x", body="ib"), ignore_reason="self_event")
+    assert (await events.get_event(conn, ign.id)).body == "ib"
+
+
+async def test_record_round_trips_normalized_event(conn, ep):
+    original = ev("k", body="the body", comment_body="a comment", labels={"sev": "high"})
+    r = await rec(conn, ep, original)
+    rebuilt = events.to_normalized(await events.get_event(conn, r.id))
+    assert rebuilt == original

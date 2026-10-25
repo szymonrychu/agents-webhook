@@ -25,17 +25,20 @@ if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
 
 RECORD_RETRIES = 3
+# Advisory lock namespace of one (endpoint, dedup_key): record and release take it, so a
+# release never returns a row to `new` while ingest inserts a `new` row of the same key.
+_KEY_LOCK = 0x77686B79  # "whky"
 # Serialises claims, so the count-based caps hold with more than one claimer.
 _CLAIM_LOCK = 0x77685F636C61696D  # "wh_claim"
 
 _COLUMNS = (
     "id, seq, priority, received_at, updated_at, endpoint_id, endpoint_suffix, type, source, "
-    "kind, action, repo, number, title, url, author, actor, labels, payload, delivery_id, "
+    "kind, action, repo, number, title, body, comment_body, url, author, actor, labels, payload, delivery_id, "
     "dedup_key, status, reason, preset_id, prompt_template, update_of, duplicate_of, deliveries, "
     "cluster_id, cluster_slug, message_id, started_at, finished_at"
 )
 # Columns latest-wins copies from a newer delivery of the same key onto the `new` row.
-_LATEST = ("action", "title", "url", "author", "actor", "labels", "payload")
+_LATEST = ("action", "title", "body", "comment_body", "url", "author", "actor", "labels", "payload")
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,8 @@ class Event:
     repo: str | None
     number: int | None
     title: str | None
+    body: str | None
+    comment_body: str | None
     url: str | None
     author: str | None
     actor: str | None
@@ -108,6 +113,8 @@ def _values(endpoint: Endpoint, event: NormalizedEvent, payload: Any) -> dict[st
         "repo": event.repo,
         "number": event.number,
         "title": event.title,
+        "body": event.body,
+        "comment_body": event.comment_body,
         "url": event.url,
         "author": event.author,
         "actor": event.actor,
@@ -201,6 +208,7 @@ async def record(
         cur = await conn.execute("SELECT count(*) FROM events WHERE status = 'new'")
         if (await cur.fetchone() or (0,))[0] >= max_queue:
             return await _insert(conn, values, "ignored", "queue_full")
+        await _lock_key(conn, "%s::bigint, %s::text", (endpoint.id, event.dedup_key))
         for _ in range(RECORD_RETRIES + 1):
             new_id = await _insert_new(conn, values)
             if new_id is not None:
@@ -299,6 +307,27 @@ async def clear_update(conn: psycopg.AsyncConnection, id: int) -> bool:
     )
 
 
+async def _lock_key(conn: psycopg.AsyncConnection, source: str, params: Any) -> None:
+    """Take the transaction lock of the key selected by `SELECT <source>`."""
+    await conn.execute(
+        f"SELECT pg_advisory_xact_lock({_KEY_LOCK}, hashtext(k.e::text || ':' || k.d)) "
+        f"FROM (SELECT {source}) AS k (e, d)",
+        params,
+    )
+
+
+async def _newer_new(conn: psycopg.AsyncConnection, id: int) -> int | None:
+    """Lock in-progress row `id` and the `new` row of its key; the latter's id, or None."""
+    cur = await conn.execute(
+        "SELECT n.id FROM events r JOIN events n ON n.endpoint_id = r.endpoint_id "
+        "AND n.dedup_key = r.dedup_key AND n.status = 'new' "
+        "WHERE r.id = %s AND r.status = 'in-progress' FOR UPDATE",
+        (id,),
+    )
+    row = await cur.fetchone()
+    return row[0] if row else None
+
+
 async def release(conn: psycopg.AsyncConnection, id: int) -> bool:
     """`in-progress -> new`, keeping `seq` (its FIFO place) and clearing run columns.
 
@@ -306,16 +335,11 @@ async def release(conn: psycopg.AsyncConnection, id: int) -> bool:
     move onto this row and it becomes ignored `duplicate` of it.
     """
     async with conn.transaction():
-        cur = await conn.execute(
-            "SELECT n.id FROM events r JOIN events n ON n.endpoint_id = r.endpoint_id "
-            "AND n.dedup_key = r.dedup_key AND n.status = 'new' "
-            "WHERE r.id = %s AND r.status = 'in-progress' FOR UPDATE",
-            (id,),
-        )
-        newer = await cur.fetchone()
+        await _lock_key(conn, "endpoint_id, dedup_key FROM events WHERE id = %s", (id,))
+        newer = await _newer_new(conn, id)
         if newer is not None:
             await transition(
-                conn, "events", newer[0], "new", "ignored", reason="duplicate", duplicate_of=id
+                conn, "events", newer, "new", "ignored", reason="duplicate", duplicate_of=id
             )
         sets = ", ".join(f"{c} = n.{c}" for c in _LATEST)
         cur = await conn.execute(
@@ -328,7 +352,7 @@ async def release(conn: psycopg.AsyncConnection, id: int) -> bool:
                 else " WHERE "
             )
             + "r.id = %(id)s AND r.status = 'in-progress'",
-            {"id": id, "newer": newer[0] if newer else None},
+            {"id": id, "newer": newer},
         )
         return cur.rowcount == 1
 
@@ -375,6 +399,28 @@ async def _now(conn: psycopg.AsyncConnection) -> datetime:
     row = await cur.fetchone()
     assert row is not None
     return row[0]
+
+
+def to_normalized(event: Event) -> NormalizedEvent:
+    """The normalised event of a row, for the prompt (`type` is the endpoint's type)."""
+    return NormalizedEvent(
+        type=event.type,
+        source=event.source,
+        kind=event.kind,
+        action=event.action or "",
+        repo=event.repo,
+        number=event.number,
+        title=event.title or "",
+        body=event.body or "",
+        comment_body=event.comment_body,
+        url=event.url,
+        author=event.author,
+        actor=event.actor,
+        labels=event.labels if event.labels is not None else [],
+        delivery_id=event.delivery_id,
+        dedup_key=event.dedup_key,
+        priority=event.priority,
+    )
 
 
 # --- reads ----------------------------------------------------------------------------------
