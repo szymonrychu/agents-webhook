@@ -1,0 +1,7 @@
+image:
+  tag: "0.1.0"
+postgres:
+  url: postgresql://webhook:pw@db:5432/webhook
+orchestrator:
+  url: http://agent-orchestrator.agents.svc
+  token: lint-token
