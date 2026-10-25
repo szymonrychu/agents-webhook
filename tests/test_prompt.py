@@ -146,6 +146,86 @@ def test_template_preview_with_example_json():
 
 
 def test_template_range_capped():
+    for tpl in ("{% for i in range(10**9) %}{% endfor %}", "{{ range(10**9) | list }}"):
+        with pytest.raises(TemplateError):
+            render(make(), tpl)
+    assert render(make(), "{{ range(10000) | list | length }}") == "10000"
+
+
+def test_template_overflow_error_is_template_error():
+    with pytest.raises(TemplateError):
+        render(make(), "{{ 1e308 * 10 ** 400 }}")
+    with pytest.raises(TemplateError):
+        render(make(), "{{ 10.0 ** 1000 }}")
+
+
+def test_template_power_bound():
+    with pytest.raises(TemplateError):
+        render(make(), "{{ 10**1000**1000**1000 }}")
+    with pytest.raises(TemplateError):
+        render(make(), "{{ 9999999 * 9999999 ** 999 * 9 ** 999 * 8 ** 999 }}")
+    assert render(make(), "{{ 2**10 }}") == "1024"
+
+
+def test_template_nested_loop_times_out():
+    import time
+
+    tpl = "{% for i in range(10000) %}{% for j in range(10000) %}{% endfor %}{% endfor %}"
+    start = time.monotonic()
+    with pytest.raises(TemplateError, match="timed out"):
+        render(make(), tpl, timeout=0.5)
+    assert time.monotonic() - start < 3
+
+
+def test_template_oversize_text_rejected():
+    big = "x" * (16 * 1024 + 1)
+    with pytest.raises(TemplateError, match="16384"):
+        render(make(), big)
+    with pytest.raises(ValueError, match="16384"):
+        validate_template(big)
+
+
+def test_template_render_with_live_thread_emits_no_fork_warning():
+    import threading
+    import warnings
+
+    stop = threading.Event()
+    t = threading.Thread(target=stop.wait)
+    t.start()
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert render(make(), "{{ title }}") == "T"
+        assert not [w for w in caught if "fork" in str(w.message).lower()]
+    finally:
+        stop.set()
+        t.join()
+
+
+def test_template_start_failure_is_template_error(monkeypatch):
+    from agents_webhook import prompt
+
+    def boom():
+        raise OSError("no processes")
+
+    monkeypatch.setattr(prompt, "_mp_context", boom)
+    with pytest.raises(TemplateError, match="start"):
+        render(make(), "{{ title }}")
+
+
+async def test_template_async_wrappers():
+    from agents_webhook.prompt import preview_async, render_async
+
+    assert await render_async(make(), "{{ title }}") == "T"
+    assert (await preview_async("{{ payload.a }}", {"a": 1})) == "1"
+    with pytest.raises(TemplateError):
+        await render_async(make(), "{{ nope }}")
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="macOS does not enforce RLIMIT_AS; runs on Linux CI"
+)
+def test_render_memory_cap_yields_template_error():
     # indent() skips the first line, so the string needs a second one to allocate.
     for tpl in ('{{ "x"|center(10**9) }}', '{{ "x\ny"|indent(10**9) }}'):
         with pytest.raises(TemplateError):
