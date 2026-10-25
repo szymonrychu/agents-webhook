@@ -84,17 +84,23 @@ def _unparsed(endpoint: Endpoint, headers: Mapping[str, str], reason: str) -> No
     )
 
 
-def _filter_reason(endpoint: Endpoint, event: NormalizedEvent, client: str) -> str | None:
-    """The endpoint's filter verdict; an evaluation failure fails closed and is logged by type."""
+def verdict(
+    event: NormalizedEvent, rules: dict[str, Any], settings: WebhookSettings, context: str
+) -> str | None:
+    """The ignore reason for `event`, shared by ingest and the template preview.
+
+    Built-in rules first, then the endpoint's filters; an evaluation failure fails closed and
+    is logged by type with `context`.
+    """
+    reason = classify(
+        event, bot_logins=settings.bot_logins, allowed_authors=settings.allowed_authors
+    )
+    if reason is not None:
+        return reason
     try:
-        return filters.evaluate(event, endpoint.filters)
+        return filters.evaluate(event, rules)
     except Exception as exc:
-        log.error(
-            "ingest: filter evaluation failed (%s) endpoint=%s client=%s",
-            type(exc).__name__,
-            endpoint.id,
-            client,
-        )
+        log.error("ingest: filter evaluation failed (%s) %s", type(exc).__name__, context)
         return FILTER_ERROR
 
 
@@ -180,13 +186,9 @@ def create_ingest_app(settings: WebhookSettings, pool: AsyncConnectionPool) -> F
             return _error(400, "bad_request")
         try:
             event = normalize(endpoint.type, headers, payload)
-            reason = classify(
-                event,
-                bot_logins=settings.bot_logins,
-                allowed_authors=settings.allowed_authors,
+            reason = verdict(
+                event, endpoint.filters, settings, f"endpoint={endpoint.id} client={client}"
             )
-            if reason is None:
-                reason = _filter_reason(endpoint, event, client)
         except TypeMismatch:
             event, reason = _unparsed(endpoint, headers, "type_mismatch"), "type_mismatch"
         except Unsupported:

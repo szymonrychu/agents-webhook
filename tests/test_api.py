@@ -484,6 +484,22 @@ async def test_preview_reports_filters(api, conn):
     assert await cur.fetchone() == (0, 0)
 
 
+async def test_preview_filters_mirror_ingest_builtin_and_error(api, monkeypatch):
+    body = {
+        "type": "github-pr",
+        "example": p.gh_pull_request(draft=True),
+        "filters": {"deny": [{"field": "author", "values": ["nobody"]}]},
+    }
+    resp = await api.post(f"{P}/templates/preview", json=body)
+    assert resp.json()["filters"] == {"passed": False, "reason": "action_ignored"}
+
+    body["example"] = p.gh_pull_request()
+    monkeypatch.setattr(filter_engine, "evaluate", lambda *a, **k: 1 / 0)
+    resp = await api.post(f"{P}/templates/preview", json=body)
+    assert resp.status_code == 200
+    assert resp.json()["filters"] == {"passed": False, "reason": "filter_error"}
+
+
 async def test_preview_requires_template_or_filters(api):
     resp = await api.post(
         f"{P}/templates/preview", json={"type": "github-pr", "example": p.gh_pull_request()}

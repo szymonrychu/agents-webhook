@@ -16,6 +16,7 @@ from agents_webhook import filters, prompt
 from agents_webhook.api import schemas
 from agents_webhook.db import endpoints, events
 from agents_webhook.db.endpoints import Endpoint, SuffixTaken
+from agents_webhook.ingest.app import verdict
 from agents_webhook.normalize import TypeMismatch, Unsupported, normalize
 from agents_webhook.settings import WebhookSettings
 
@@ -183,7 +184,7 @@ def build_router(
                 canonical = filters.validate(body.type, body.filters.model_dump())
             except ValueError as exc:
                 raise _invalid(str(exc)) from exc
-            reason = filters.evaluate(event, canonical)
+            reason = verdict(event, canonical, settings, "source=preview")
             result = {"passed": reason is None, "reason": reason}
         text = None
         if body.template is not None:
