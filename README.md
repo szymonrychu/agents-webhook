@@ -2,11 +2,11 @@
 
 Part of the agents-webhook-component project (python).
 
-Webhook endpoints that turn provider events (GitHub, GitLab, Grafana) into prompts for agents run by agent-orchestrator. One image, four subcommands: `migrate`, `ingest` (public listener), `api` (UI API) and `worker` (dispatcher).
+Webhook endpoints that turn provider events (GitHub, GitLab, Grafana) into prompts for agents run by agents-orchestrator. One image, four subcommands: `migrate`, `ingest` (public listener), `api` (UI API) and `worker` (dispatcher).
 
 ## Overview
 
-agents-webhook turns provider events into prompts for agents run by agent-orchestrator. One image, four processes (subcommands):
+agents-webhook turns provider events into prompts for agents run by agents-orchestrator. One image, four processes (subcommands):
 
 - `ingest`: the public listener for `POST /webhook/{suffix}`. It authenticates, normalizes and records the event in Postgres and answers 202; it never talks to the orchestrator and holds no orchestrator token.
 - `api`: the UI API under `/webhooks/api/v1`, behind SSO. It manages endpoints and reads events.
@@ -40,7 +40,7 @@ Every setting is an environment variable. The first block is read by all subcomm
 | `WEBHOOK_HTTP_HOST` | `0.0.0.0` | listen address |
 | `WEBHOOK_HTTP_PORT` | 8000 | listen port |
 | `WEBHOOK_LOG_LEVEL` | `INFO` | log level |
-| `WEBHOOK_ORCHESTRATOR_URL` | required for `api`, `worker` | agent-orchestrator base URL |
+| `WEBHOOK_ORCHESTRATOR_URL` | required for `api`, `worker` | the agents-orchestrator base URL |
 | `WEBHOOK_ORCHESTRATOR_TOKEN` | empty | service token for the orchestrator (`api`, `worker`) |
 | `WEBHOOK_ORCHESTRATOR_TOKEN_FILE` | empty | file holding the token; wins over the variable |
 | `WEBHOOK_SHUTDOWN_GRACE_SECONDS` | 20 | graceful shutdown time |
