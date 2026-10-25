@@ -1,0 +1,17 @@
+[tools]
+python = "3.14.6"
+uv = "0.12.23"
+ruff = "0.15.20"
+"pipx:pytest" = "9.1.1"
+
+[tasks.test]
+description = "Run test"
+run = "pytest"
+
+[tasks.lint]
+description = "Run lint"
+run = "ruff check ."
+
+[tasks.fmt]
+description = "Run fmt"
+run = "ruff format ."
