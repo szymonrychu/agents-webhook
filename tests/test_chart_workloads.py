@@ -206,8 +206,13 @@ def test_annotations_api_only_keeps_ingest_out_of_sso():
         )
 
 
-def test_lint_without_values():
+def test_lint_with_ci_values():
     helm = shutil.which("helm")
     assert helm
-    proc = subprocess.run([helm, "lint", str(CHART)], capture_output=True, text=True)
+    cmd = [helm, "lint", str(CHART), "-f", str(CHART / "ci" / "lint-values.yaml")]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_render_without_required_values_fails():
+    assert "is required" in render_error({})

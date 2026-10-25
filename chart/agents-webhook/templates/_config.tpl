@@ -1,7 +1,6 @@
 {{/* Settings ConfigMap data; no secret values. Fails on a bad env key or a missing orchestrator url. */}}
 {{- define "agents-webhook.config" -}}
-{{- if not (include "agents-webhook.lintMode" .) }}{{ $_ := required "orchestrator.url is required" .Values.orchestrator.url }}{{ end }}
-WEBHOOK_ORCHESTRATOR_URL: {{ .Values.orchestrator.url | default "" | quote }}
+WEBHOOK_ORCHESTRATOR_URL: {{ required "orchestrator.url is required" .Values.orchestrator.url | quote }}
 WEBHOOK_PUBLIC_BASE_URL: {{ .Values.publicBaseUrl | quote }}
 WEBHOOK_TRUSTED_PROXIES: {{ join "," (.Values.trustedProxies | default list) | quote }}
 WEBHOOK_MAX_IN_PROGRESS: {{ .Values.limits.maxInProgress | int | toString | quote }}

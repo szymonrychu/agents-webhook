@@ -1,5 +1,4 @@
-{{- $tag := "lint" }}
-{{- if not (include "agents-webhook.lintMode" .) }}{{ $tag = required "image.tag is required (set image.tag)" .Values.image.tag }}{{ end }}
+{{- $tag := required "image.tag is required (set image.tag)" .Values.image.tag }}
 {{- $image := printf "%s:%s" .Values.image.repository $tag }}
 {{- $settingsSum := include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
 {{- range $component := list "ingest" "api" "worker" }}

@@ -59,9 +59,7 @@ imagePullSecrets:
 {{/* Name of the Secret holding the database URL; fails when no source is set. */}}
 {{- define "agents-webhook.databaseSecretName" -}}
 {{- $p := .Values.postgres -}}
-{{- if include "agents-webhook.lintMode" . -}}
-lint
-{{- else if and $p.url $p.existingSecret -}}
+{{- if and $p.url $p.existingSecret -}}
 {{- fail "agents-webhook: set only one of postgres.url and postgres.existingSecret" -}}
 {{- else if $p.existingSecret -}}
 {{- $p.existingSecret -}}
@@ -83,9 +81,7 @@ uri
 {{/* Name of the Secret holding the orchestrator token; fails when none is set. */}}
 {{- define "agents-webhook.tokenSecretName" -}}
 {{- $o := .Values.orchestrator -}}
-{{- if include "agents-webhook.lintMode" . -}}
-lint
-{{- else if and $o.tokenSecret $o.tokenSecret.name -}}
+{{- if and $o.tokenSecret $o.tokenSecret.name -}}
 {{- $o.tokenSecret.name -}}
 {{- else if $o.token -}}
 {{- include "agents-webhook.fullname" . }}-orchestrator
@@ -123,14 +119,4 @@ env:
         name: {{ include "agents-webhook.tokenSecretName" .context }}
         key: {{ include "agents-webhook.tokenSecretKey" .context }}
 {{- end }}
-{{- end }}
-
-{{/*
-True only for a bare `helm lint chart/agents-webhook` (release name test-release, no required value
-set): the required-value checks are skipped so the chart lints without a values file.
-*/}}
-{{- define "agents-webhook.lintMode" -}}
-{{- if and (eq .Release.Name "test-release") (not .Values.image.tag) (not .Values.orchestrator.url) (not .Values.postgres.url) (not .Values.postgres.existingSecret) -}}
-true
-{{- end -}}
 {{- end }}

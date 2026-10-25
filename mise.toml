@@ -27,7 +27,7 @@ run = "uv run pytest tests/test_chart_*.py -q"
 
 [tasks."lint:chart"]
 description = "Lint the helm chart"
-run = "helm lint chart"
+run = "helm lint chart/agents-webhook -f chart/agents-webhook/ci/lint-values.yaml"
 
 [tasks."test:e2e"]
 description = "Run the end-to-end tests"
