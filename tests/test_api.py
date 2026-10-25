@@ -377,6 +377,21 @@ async def test_events_list_has_no_payload_detail_has(api, conn, preset):
     assert detail["status"] == "new" and detail["id"] == ids[0]
 
 
+async def test_event_view_session_fields(api, conn, pool, preset):
+    _, ids = await seed(conn, preset, 2)
+    claimed = await events.claim_next(
+        conn, max_in_progress=10, max_per_endpoint=10, reuse_endpoints=set()
+    )
+    assert claimed is not None and claimed.event.id == ids[0]
+    await events.EventStore(pool).set_session(ids[0], "s1")
+    listed = {e["id"]: e for e in (await api.get(f"{P}/events")).json()}
+    detail = (await api.get(f"{P}/events/{ids[0]}")).json()
+    for view in (listed[ids[0]], detail):
+        assert (view["session_id"], view["session_slug"]) == ("s1", f"wh-{ids[0]}")
+    assert (listed[ids[1]]["session_id"], listed[ids[1]]["session_slug"]) == (None, None)
+    assert not [k for view in (*listed.values(), detail) for k in view if "cluster" in k]
+
+
 async def test_events_unknown_404(api):
     resp = await api.get(f"{P}/events/9999")
     assert resp.status_code == 404 and code(resp) == "not_found"

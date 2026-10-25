@@ -69,34 +69,42 @@ PRUNE_BATCH = 1000
 
 
 def run_ref(event: events.Event) -> runs.RunRef:
-    """The run columns of an in-progress row (`slug` is the recorded cluster's, else its own)."""
+    """The run columns of an in-progress row (`slug` is the recorded session's, else its own)."""
     assert event.started_at is not None
     return runs.RunRef(
         id=event.id,
-        slug=event.cluster_slug or f"wh-{event.id}",
+        slug=event.session_slug or f"wh-{event.id}",
         preset_id=event.preset_id or "",
-        cluster_id=event.cluster_id,
+        cluster_id=event.session_id,
         message_id=event.message_id,
         started_at=event.started_at,
     )
 
 
-class _FallbackStore:
-    """The run store of a reuse-fallback row: a failure reason is prefixed `reuse_fallback`."""
+class _RunStore:
+    """The `runs.RunStore` agents-common v0.2.0 drives over `EventStore`: the id it records
+    through `set_cluster` is the row's session."""
 
     def __init__(self, store: events.EventStore) -> None:
         self._store = store
 
     async def set_cluster(self, run_id: runs.RunId, cluster_id: str) -> None:
-        await self._store.set_cluster(run_id, cluster_id)
+        await self._store.set_session(run_id, cluster_id)
 
     async def set_message(self, run_id: runs.RunId, message_id: str) -> None:
         await self._store.set_message(run_id, message_id)
 
     async def finish(self, run_id: runs.RunId, status: runs.RunStatus, reason: str | None) -> bool:
+        return await self._store.finish(run_id, status, reason)
+
+
+class _FallbackStore(_RunStore):
+    """The run store of a reuse-fallback row: a failure reason is prefixed `reuse_fallback`."""
+
+    async def finish(self, run_id: runs.RunId, status: runs.RunStatus, reason: str | None) -> bool:
         if status == "failed":
             reason = f"{REUSE_FALLBACK}: {reason}" if reason else REUSE_FALLBACK
-        return await self._store.finish(run_id, status, reason)
+        return await super().finish(run_id, status, reason)
 
 
 class Worker:
@@ -114,6 +122,7 @@ class Worker:
         self.pool = pool
         self.client = client
         self.store = events.EventStore(pool)
+        self.run_store = _RunStore(self.store)
         self._fallback_store = _FallbackStore(self.store)
         self._clock = clock
         self._unavailable_logged: dict[tuple[str, int], float] = {}
@@ -206,25 +215,25 @@ class Worker:
 
     async def _deliver(self, event: events.Event, parent: events.Event) -> None:
         """Deliver update row `event` to `parent`'s cluster while it runs, else fall back."""
-        assert parent.cluster_id is not None
+        assert parent.session_id is not None
         try:
-            if await runs.running_cluster(self.client, parent.cluster_id) is None:
+            if await runs.running_cluster(self.client, parent.session_id) is None:
                 log.info("event %s: cluster of event %s is not running", event.id, parent.id)
                 await self._fallback(event)
                 return
-            if event.cluster_id is None:
-                await self.store.set_cluster(event.id, parent.cluster_id, slug=parent.cluster_slug)
+            if event.session_id is None:
+                await self.store.set_session(event.id, parent.session_id, slug=parent.session_slug)
                 event = dataclasses.replace(
-                    event, cluster_id=parent.cluster_id, cluster_slug=parent.cluster_slug
+                    event, session_id=parent.session_id, session_slug=parent.session_slug
                 )
-            text = await self._render(event, self.store, update=True)
+            text = await self._render(event, self.run_store, update=True)
             if text is None:
                 return
             delivered = await runs.deliver(
                 self.client,
-                self.store,
+                self.run_store,
                 run_ref(event),
-                parent.cluster_id,
+                parent.session_id,
                 text,
                 runs.marker(RUN_KIND, event.id),
             )
@@ -246,7 +255,7 @@ class Worker:
         try:
             outcome = await runs.track_delivery(
                 self.client,
-                self.store,
+                self.run_store,
                 run_ref(event),
                 timeout_seconds=self.settings.run_timeout_seconds,
             )
@@ -342,7 +351,7 @@ class Worker:
             return
         async with self.pool.connection() as conn:
             parent = await events.get_event(conn, event.update_of)
-        if parent is None or parent.cluster_id is None:
+        if parent is None or parent.session_id is None:
             await self._fallback(event)
             return
         await self._deliver(event, parent)
@@ -366,7 +375,7 @@ class Worker:
             return None
 
     def _store_of(self, event: events.Event) -> runs.RunStore:
-        return self._fallback_store if event.reason == REUSE_FALLBACK else self.store
+        return self._fallback_store if event.reason == REUSE_FALLBACK else self.run_store
 
     async def _track(self, event: events.Event) -> None:
         if event.update_of is not None:

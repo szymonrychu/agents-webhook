@@ -109,7 +109,7 @@ async def test_reuse_on_while_first_turn_runs_goes_to_the_same_cluster(
     r = await row(conn, second)
     assert r.status == "in-progress"
     assert r.update_of == first.id
-    assert (r.cluster_id, r.cluster_slug) == (cluster["id"], f"wh-{first.id}")
+    assert (r.session_id, r.session_slug) == (cluster["id"], f"wh-{first.id}")
     msgs = messages_of(fake, cluster["id"])
     assert [m["id"] for m in msgs] == [int(first.message_id), int(r.message_id)]
     assert msgs[1]["text"] == update_text(r)
@@ -138,7 +138,7 @@ async def test_reuse_on_after_first_turn_completed_goes_to_the_same_cluster(
     second = await rec(conn, ep, ev(action="synchronize"))
     await w.tick()
     r = await row(conn, second)
-    assert (r.status, r.update_of, r.cluster_id) == ("in-progress", first.id, cluster["id"])
+    assert (r.status, r.update_of, r.session_id) == ("in-progress", first.id, cluster["id"])
 
     fake.mark_sent(int(r.message_id))
     await w.tick()
@@ -175,7 +175,7 @@ async def test_reuse_on_flag_change_takes_effect_for_later_events(
     second = await rec(conn, ep, ev(action="synchronize"))
     await w.tick()
     r = await row(conn, second)
-    assert (r.update_of, r.cluster_id) == (first.id, cluster["id"])
+    assert (r.update_of, r.session_id) == (first.id, cluster["id"])
 
 
 async def test_reuse_on_unavailable_preset_read_skips_the_endpoint(
@@ -198,14 +198,14 @@ async def test_reuse_on_unavailable_preset_read_skips_the_endpoint(
     await w.tick()
 
     s = await row(conn, skipped)
-    assert (s.status, s.update_of, s.cluster_id) == ("new", None, None)
+    assert (s.status, s.update_of, s.session_id) == ("new", None, None)
     assert (await row(conn, other)).status == "in-progress"
     assert len(messages_of(fake, cluster["id"])) == 1
 
     monkeypatch.setattr(OrchestratorClient, "get_preset", original)
     await w.tick()
     s = await row(conn, skipped)
-    assert (s.status, s.update_of, s.cluster_id) == ("in-progress", first.id, cluster["id"])
+    assert (s.status, s.update_of, s.session_id) == ("in-progress", first.id, cluster["id"])
 
 
 # --- reuse off ------------------------------------------------------------------------------
@@ -227,9 +227,9 @@ async def test_reuse_off_starts_its_own_cluster_after_the_first_ends(
     fake.complete_turn(int(first.message_id), "ok")
     await w.tick()
     r = await row(conn, second)
-    assert (r.status, r.update_of, r.cluster_slug) == ("in-progress", None, f"wh-{second}")
-    assert r.cluster_id != cluster["id"]
-    assert messages_of(fake, r.cluster_id)[0]["text"] == first_text(r)
+    assert (r.status, r.update_of, r.session_slug) == ("in-progress", None, f"wh-{second}")
+    assert r.session_id != cluster["id"]
+    assert messages_of(fake, r.session_id)[0]["text"] == first_text(r)
     assert len(fake.clusters) == 2
 
 
@@ -323,7 +323,7 @@ async def test_discard_before_delivery_starts_a_new_cluster(
     await w.tick()
 
     r = await row(conn, second)
-    assert (r.status, r.update_of, r.cluster_slug) == ("in-progress", None, f"wh-{second}")
+    assert (r.status, r.update_of, r.session_slug) == ("in-progress", None, f"wh-{second}")
     new = cluster_of(fake, f"wh-{second}")
     assert messages_of(fake, new["id"])[0]["text"] == first_text(r)
 
@@ -348,7 +348,7 @@ async def test_discard_mid_delivery_message_cancelled_starts_a_new_cluster(
     await w.tick()
 
     r = await row(conn, second)
-    assert (r.status, r.update_of, r.cluster_slug) == ("in-progress", None, f"wh-{second}")
+    assert (r.status, r.update_of, r.session_slug) == ("in-progress", None, f"wh-{second}")
     new = cluster_of(fake, f"wh-{second}")
     [msg] = messages_of(fake, new["id"])
     assert msg["text"] == first_text(r)
@@ -371,7 +371,7 @@ async def test_discard_race_post_answers_409_starts_a_new_cluster(
     await w.tick()
 
     r = await row(conn, second)
-    assert (r.status, r.update_of, r.cluster_slug) == ("in-progress", None, f"wh-{second}")
+    assert (r.status, r.update_of, r.session_slug) == ("in-progress", None, f"wh-{second}")
     assert len(messages_of(fake, cluster["id"])) == 1
     cluster_of(fake, f"wh-{second}")
 
@@ -387,7 +387,7 @@ async def test_discard_autoclose_deleting_ends_reuse(conn, fake, make_endpoint, 
     second = await rec(conn, ep, ev(action="synchronize"))
     await w.tick()
     r = await row(conn, second)
-    assert (r.update_of, r.cluster_slug) == (None, f"wh-{second}")
+    assert (r.update_of, r.session_slug) == (None, f"wh-{second}")
     assert len(messages_of(fake, cluster["id"])) == 1
 
 
@@ -425,7 +425,7 @@ async def test_discard_new_cluster_becomes_the_target_of_later_events(
     third = await rec(conn, ep, ev(action="synchronize", comment_body="again"))
     await w.tick()
     r = await row(conn, third)
-    assert (r.update_of, r.cluster_id, r.cluster_slug) == (second, new["id"], f"wh-{second}")
+    assert (r.update_of, r.session_id, r.session_slug) == (second, new["id"], f"wh-{second}")
 
 
 # --- caps -----------------------------------------------------------------------------------
@@ -450,9 +450,9 @@ async def test_caps_full_reuse_delivery_still_goes_and_a_fallback_row_is_release
     await w.tick()
 
     u = await row(conn, update)
-    assert (u.status, u.update_of, u.cluster_id) == ("in-progress", first.id, cluster["id"])
+    assert (u.status, u.update_of, u.session_id) == ("in-progress", first.id, cluster["id"])
     f = await row(conn, fallback)
-    assert (f.status, f.update_of, f.cluster_id, f.started_at) == ("new", None, None, None)
+    assert (f.status, f.update_of, f.session_id, f.started_at) == ("new", None, None, None)
     assert f.seq == seq
     assert len(fake.clusters) == 2
 
@@ -465,8 +465,8 @@ async def test_caps_full_reuse_delivery_still_goes_and_a_fallback_row_is_release
     await w.tick()
     assert await statuses(conn, [first.id, update]) == ["handled", "handled"]
     f = await row(conn, fallback)
-    assert (f.status, f.update_of, f.cluster_slug) == ("in-progress", None, f"wh-{fallback}")
-    assert messages_of(fake, f.cluster_id)[0]["text"] == first_text(f)
+    assert (f.status, f.update_of, f.session_slug) == ("in-progress", None, f"wh-{fallback}")
+    assert messages_of(fake, f.session_id)[0]["text"] == first_text(f)
 
     fake.complete_turn(int(f.message_id), "ok")
     await w.tick()
@@ -493,7 +493,7 @@ async def test_caps_mid_delivery_fallback_released_when_full(
     await w.tick()  # first is still in progress: caps 2/2 with first + filler
 
     r = await row(conn, second)
-    assert (r.status, r.update_of, r.cluster_id) == ("new", None, None)
+    assert (r.status, r.update_of, r.session_id) == ("new", None, None)
     assert len(fake.clusters) == 2
 
 
@@ -520,7 +520,7 @@ async def test_restart_between_deliver_and_set_message_adopts_the_marker_message
     with pytest.raises(Crash):
         await make_worker().tick()
     r = await row(conn, second)
-    assert (r.update_of, r.cluster_id, r.message_id) == (first.id, cluster["id"], None)
+    assert (r.update_of, r.session_id, r.message_id) == (first.id, cluster["id"], None)
     assert len(messages_of(fake, cluster["id"])) == 2
 
     monkeypatch.setattr(events.EventStore, "set_message", original)
@@ -543,21 +543,21 @@ async def test_restart_after_mark_update_resumes_the_delivery(
     w = make_worker()
     first, cluster = await start_first(conn, fake, w, ep)
     second = await rec(conn, ep, ev(action="synchronize"))
-    original = events.EventStore.set_cluster
+    original = events.EventStore.set_session
 
-    async def crash(self, run_id, cluster_id, *, slug=None):
+    async def crash(self, run_id, session_id, *, slug=None):
         raise Crash("killed after mark_update")
 
-    monkeypatch.setattr(events.EventStore, "set_cluster", crash)
+    monkeypatch.setattr(events.EventStore, "set_session", crash)
     with pytest.raises(Crash):
         await make_worker().tick()
     r = await row(conn, second)
-    assert (r.update_of, r.cluster_id, r.message_id) == (first.id, None, None)
+    assert (r.update_of, r.session_id, r.message_id) == (first.id, None, None)
 
-    monkeypatch.setattr(events.EventStore, "set_cluster", original)
+    monkeypatch.setattr(events.EventStore, "set_session", original)
     await make_worker().tick()
     r = await row(conn, second)
-    assert (r.cluster_id, r.cluster_slug) == (cluster["id"], f"wh-{first.id}")
+    assert (r.session_id, r.session_slug) == (cluster["id"], f"wh-{first.id}")
     assert len(messages_of(fake, cluster["id"])) == 2
     assert len(fake.clusters) == 1
 
@@ -583,7 +583,7 @@ async def test_restart_orchestrator_down_at_running_check_retries_next_tick(
     monkeypatch.setattr(OrchestratorClient, "get_cluster", original)
     await w.tick()
     r = await row(conn, second)
-    assert (r.update_of, r.cluster_id) == (first.id, cluster["id"])
+    assert (r.update_of, r.session_id) == (first.id, cluster["id"])
     assert r.message_id is not None
     assert len(fake.clusters) == 1
 
@@ -604,7 +604,7 @@ async def test_discard_deliver_4xx_falls_back_to_a_new_cluster(
     await w.tick()
 
     r = await row(conn, second)
-    assert (r.status, r.update_of, r.cluster_slug) == ("in-progress", None, f"wh-{second}")
+    assert (r.status, r.update_of, r.session_slug) == ("in-progress", None, f"wh-{second}")
     assert len(messages_of(fake, cluster["id"])) == 1
     new = cluster_of(fake, f"wh-{second}")
     assert messages_of(fake, new["id"])[0]["text"] == first_text(r)

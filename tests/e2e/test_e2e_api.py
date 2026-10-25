@@ -75,9 +75,9 @@ def test_create_endpoint_receive_event_and_complete(stack: Stack):
     accepted = accept(stack, created, *PR)
     assert accepted["status"] == "new"
     row = stack.wait_status(accepted["id"], "in-progress")
-    assert row["cluster_slug"] == f"wh-{accepted['id']}"
+    assert row["session_slug"] == f"wh-{accepted['id']}"
     assert row["endpoint_suffix"] == created["suffix"]
-    stack.cluster(row["cluster_slug"])
+    stack.cluster(row["session_slug"])
 
     stack.fake.complete_turn(int(row["message_id"]), "done")
     assert stack.wait_status(accepted["id"], "handled")["finished_at"] is not None
@@ -121,7 +121,7 @@ def test_deny_filter_ignores_and_others_run(stack: Stack):
 
     ran = finish(stack, accept(stack, ep, PR[0], titled("Ship it"))["id"])
     assert ran["status"] == "handled"
-    assert len([c for c in stack.fake.clusters.values() if c["slug"] == ran["cluster_slug"]]) == 1
+    assert len([c for c in stack.fake.clusters.values() if c["slug"] == ran["session_slug"]]) == 1
 
 
 def test_allow_filter_ignores_stranger(stack: Stack):
@@ -224,7 +224,7 @@ def test_endpoint_template_prompt_is_the_first_cluster_message(stack: Stack):
     row = stack.wait_status(
         accept(stack, ep, p.gh_headers("pull_request"), json_body_pr())["id"], "in-progress"
     )
-    messages = stack.messages(stack.cluster(row["cluster_slug"])["id"])
+    messages = stack.messages(stack.cluster(row["session_slug"])["id"])
     assert len(messages) == 1
     assert messages[0]["text"].startswith("Service billing: Fix it")
     assert str(row["id"]) in messages[0]["text"]  # the run marker follows the prompt
@@ -267,11 +267,11 @@ def comment(stack: Stack, ep: dict, who: str = "bob") -> int:
 def test_reuse_on_delivers_to_the_running_cluster_then_starts_a_new_one(stack: Stack):
     ep = stack.create_endpoint("github-pr", preset_id=stack.preset(reuse_running_agent=True))
     first = stack.wait_status(accept(stack, ep, *PR)["id"], "in-progress")
-    cluster = stack.cluster(first["cluster_slug"])
+    cluster = stack.cluster(first["session_slug"])
 
     second = stack.wait_status(comment(stack, ep), "in-progress")
     assert second["update_of"] == first["id"]
-    assert second["cluster_id"] == cluster["id"]
+    assert second["session_id"] == cluster["id"]
     assert len(stack.messages(cluster["id"])) == 2
     assert len([c for c in stack.fake.clusters.values() if c["preset_id"] == ep["preset_id"]]) == 1
     stack.fake.mark_sent(int(second["message_id"]))
@@ -281,9 +281,9 @@ def test_reuse_on_delivers_to_the_running_cluster_then_starts_a_new_one(stack: S
 
     stack.fake.discard_cluster(cluster["id"])
     third = stack.wait_status(comment(stack, ep), "in-progress")
-    assert third["cluster_slug"] == f"wh-{third['id']}"
-    assert third["cluster_id"] != cluster["id"]
-    assert len(stack.messages(third["cluster_id"])) == 1
+    assert third["session_slug"] == f"wh-{third['id']}"
+    assert third["session_id"] != cluster["id"]
+    assert len(stack.messages(third["session_id"])) == 1
 
 
 def test_reuse_off_starts_its_own_cluster(stack: Stack):
@@ -291,8 +291,8 @@ def test_reuse_off_starts_its_own_cluster(stack: Stack):
     first = finish(stack, accept(stack, ep, *PR)["id"])
     second = stack.wait_status(comment(stack, ep), "in-progress")
     assert second["update_of"] is None
-    assert second["cluster_slug"] == f"wh-{second['id']}"
-    assert second["cluster_id"] != first["cluster_id"]
+    assert second["session_slug"] == f"wh-{second['id']}"
+    assert second["session_id"] != first["session_id"]
 
 
 # --- ignore reasons -------------------------------------------------------------------------

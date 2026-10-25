@@ -1,10 +1,12 @@
 import asyncio
 import dataclasses
+import re
+import uuid
 
 import psycopg
 import pytest
-from agents_common.db import open_pool
-from agents_common.runs import RunStore
+from agents_common.db import migrate, open_pool
+from psycopg import sql
 
 from agents_webhook.db import endpoints, events
 from agents_webhook.db.endpoints import EndpointIn
@@ -297,8 +299,8 @@ async def test_claim_per_key_order_without_reuse(conn, store, ep):
     assert (await claim(conn)).event.id == first.id
     second = await rec(conn, ep, ev("k"))
     other = await rec(conn, ep, ev("other"))
-    # Same key in progress (even with a cluster): reuse off waits for it to end.
-    await store.set_cluster(first.id, "c1")
+    # Same key in progress (even with a session): reuse off waits for it to end.
+    await store.set_session(first.id, "c1")
     assert (await claim(conn)).event.id == other.id
     assert await claim(conn) is None
     assert await store.finish(first.id, "handled", None)
@@ -312,13 +314,13 @@ async def test_claim_per_key_order_with_reuse(conn, store, ep):
     first = await rec(conn, ep, ev("k"))
     assert (await claim(conn, reuse=reuse)).event.id == first.id
     second = await rec(conn, ep, ev("k"))
-    # The first row is in progress without a cluster: same key waits.
+    # The first row is in progress without a session: same key waits.
     assert await claim(conn, reuse=reuse) is None
-    await store.set_cluster(first.id, "c1")
+    await store.set_session(first.id, "c1")
     got = await claim(conn, reuse=reuse)
     assert got.event.id == second.id and got.prior.id == first.id
     assert await events.mark_update(conn, second.id, first.id)
-    await store.set_cluster(second.id, "c1")
+    await store.set_session(second.id, "c1")
     third = await rec(conn, ep, ev("k"))
     # An update of the key is in flight: the next one waits for it.
     assert await claim(conn, reuse=reuse) is None
@@ -331,7 +333,7 @@ async def test_reuse_candidate_bypasses_full_caps(conn, store, ep, make_endpoint
     other = await make_endpoint()
     first = await rec(conn, ep, ev("k"))
     assert (await claim(conn, cap=1, per=1, reuse={ep.id})).event.id == first.id
-    await store.set_cluster(first.id, "c1")
+    await store.set_session(first.id, "c1")
     blocked = await rec(conn, other, ev("x"))
     update = await rec(conn, ep, ev("k"))
     got = await claim(conn, cap=1, per=1, reuse={ep.id})
@@ -342,28 +344,28 @@ async def test_reuse_candidate_bypasses_full_caps(conn, store, ep, make_endpoint
     assert (await events.get_event(conn, blocked.id)).status == "new"
 
 
-async def test_reuse_prior_is_newest_run_with_cluster(conn, store, ep):
+async def test_reuse_prior_is_newest_run_with_session(conn, store, ep):
     reuse = {ep.id}
     r1 = await rec(conn, ep, ev("k"))
     await claim(conn, reuse=reuse)
-    await store.set_cluster(r1.id, "c1")
+    await store.set_session(r1.id, "c1")
     await store.finish(r1.id, "handled", None)
     r2 = await rec(conn, ep, ev("k"))
     await claim(conn, reuse=reuse)
-    await store.set_cluster(r2.id, "c2")
+    await store.set_session(r2.id, "c2")
     await store.finish(r2.id, "failed", "x")
-    # An update row and a run without a cluster are never a prior.
+    # An update row and a run without a session are never a prior.
     r3 = await rec(conn, ep, ev("k"))
     await claim(conn, reuse=reuse)
     await events.mark_update(conn, r3.id, r2.id)
-    await store.set_cluster(r3.id, "c2")
+    await store.set_session(r3.id, "c2")
     await store.finish(r3.id, "handled", None)
     r4 = await rec(conn, ep, ev("k"))
     await claim(conn, reuse=reuse)
     await store.finish(r4.id, "failed", "preset_not_found")
     r5 = await rec(conn, ep, ev("k"))
     got = await claim(conn, reuse=reuse)
-    assert got.event.id == r5.id and got.prior.id == r2.id and got.prior.cluster_id == "c2"
+    assert got.event.id == r5.id and got.prior.id == r2.id and got.prior.session_id == "c2"
     assert (await events.latest_run(conn, ep.id, "k")).id == r2.id
     assert await events.latest_run(conn, ep.id, "nope") is None
 
@@ -386,7 +388,7 @@ async def test_reuse_release_merges_a_newer_new_row_of_the_key(conn, store, ep):
     a = await rec(conn, ep, ev("k", title="old"), {"v": 1})
     await claim(conn, reuse={ep.id})
     await events.mark_update(conn, a.id, a.id)
-    await store.set_cluster(a.id, "c1")
+    await store.set_session(a.id, "c1")
     await store.set_message(a.id, "m1")
     newer = await rec(conn, ep, ev("k", title="newer"), {"v": 2})
     assert await events.clear_update(conn, a.id)
@@ -394,7 +396,7 @@ async def test_reuse_release_merges_a_newer_new_row_of_the_key(conn, store, ep):
     row = await events.get_event(conn, a.id)
     assert row.status == "new" and row.title == "newer" and row.payload == {"v": 2}
     assert row.deliveries == 2 and row.update_of is None
-    assert (row.cluster_id, row.cluster_slug, row.message_id) == (None, None, None)
+    assert (row.session_id, row.session_slug, row.message_id) == (None, None, None)
     gone = await events.get_event(conn, newer.id)
     assert (gone.status, gone.reason, gone.duplicate_of) == ("ignored", "duplicate", a.id)
 
@@ -451,18 +453,18 @@ async def test_guarded_transitions_refuse_wrong_source_status(conn, store, ep):
     assert not await events.clear_update(conn, new.id)
     assert not await events.release(conn, new.id)
     assert not await store.finish(new.id, "handled", None)
-    await store.set_cluster(new.id, "c1")
+    await store.set_session(new.id, "c1")
     await store.set_message(new.id, "m1")
     row = await events.get_event(conn, new.id)
-    assert row.status == "new" and row.cluster_id is None and row.message_id is None
+    assert row.status == "new" and row.session_id is None and row.message_id is None
     await claim(conn)
     assert await store.finish(new.id, "handled", None)
     assert not await store.finish(new.id, "failed", "late")
     assert not await events.release(conn, new.id)
     assert not await events.mark_update(conn, new.id, new.id)
-    await store.set_cluster(new.id, "c2")
+    await store.set_session(new.id, "c2")
     row = await events.get_event(conn, new.id)
-    assert row.status == "handled" and row.reason is None and row.cluster_id is None
+    assert row.status == "handled" and row.reason is None and row.session_id is None
     with pytest.raises(ValueError):
         await store.finish(new.id, "ignored", None)
 
@@ -474,14 +476,13 @@ async def test_guarded_ignored_rows_never_move(conn, store, ep):
     assert (await events.get_event(conn, ign.id)).status == "ignored"
 
 
-async def test_run_store_records_cluster_message_and_finish(conn, store, ep):
-    assert isinstance(store, RunStore)
+async def test_run_store_records_session_message_and_finish(conn, store, ep):
     r = await rec(conn, ep, ev("k"))
     await claim(conn)
-    await store.set_cluster(r.id, "c1")
+    await store.set_session(r.id, "c1")
     await store.set_message(r.id, "m1")
     row = await events.get_event(conn, r.id)
-    assert (row.cluster_id, row.cluster_slug, row.message_id) == ("c1", f"wh-{r.id}", "m1")
+    assert (row.session_id, row.session_slug, row.message_id) == ("c1", f"wh-{r.id}", "m1")
     assert [e.id for e in await events.in_progress(conn)] == [r.id]
     assert await store.finish(r.id, "failed", "turn_failed")
     row = await events.get_event(conn, r.id)
@@ -492,8 +493,8 @@ async def test_run_store_records_cluster_message_and_finish(conn, store, ep):
 async def test_run_store_update_row_keeps_given_slug(conn, store, ep):
     r = await rec(conn, ep, ev("k"))
     await claim(conn)
-    await store.set_cluster(r.id, "c1", slug="wh-1")
-    assert (await events.get_event(conn, r.id)).cluster_slug == "wh-1"
+    await store.set_session(r.id, "c1", slug="wh-1")
+    assert (await events.get_event(conn, r.id)).session_slug == "wh-1"
 
 
 # --- reads ----------------------------------------------------------------------------------
@@ -620,3 +621,54 @@ async def test_ignored_rows_store_truncated_payload(conn, store, ep, make_endpoi
     assert await events.release(conn, keep.id)
     assert (await events.get_event(conn, keep.id)).payload == HUGE
     _assert_truncated(await events.get_event(conn, newer.id))
+
+
+# --- migrations -----------------------------------------------------------------------------
+
+
+@pytest.fixture
+def empty_db(pg_url):
+    """URL of a fresh database with no migration applied."""
+    name = f"t_{uuid.uuid4().hex}"
+    base = pg_url.rsplit("/", 1)[0]
+    with psycopg.connect(pg_url, autocommit=True) as c:
+        c.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    yield f"{base}/{name}"
+    with psycopg.connect(pg_url, autocommit=True) as c:
+        c.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
+
+
+def test_0005_renames_cluster_columns(empty_db, monkeypatch):
+    # Migrate to 0004 only (the live schema before this rename) and seed run rows there.
+    monkeypatch.setattr(migrate, "_NAME", re.compile(r"^000[1-4]_.+\.sql$"))
+    assert migrate.run_migrations(empty_db, "agents_webhook")[-1] == "0004_endpoint_filters.sql"
+    monkeypatch.undo()
+    seed = (
+        "INSERT INTO events (priority, endpoint_suffix, type, source, kind, payload, dedup_key, "
+        "status, cluster_id, cluster_slug) VALUES "
+        "(1, 's', 'github-pr', 'github', 'mr', '{}', 'k1', 'handled', 'c1', 'wh-1'), "
+        "(1, 's', 'github-pr', 'github', 'mr', '{}', 'k2', 'new', NULL, NULL) RETURNING id"
+    )
+    with psycopg.connect(empty_db, autocommit=True) as c:
+        ids = [r[0] for r in c.execute(seed).fetchall()]
+
+    assert migrate.run_migrations(empty_db, "agents_webhook") == ["0005_sessions.sql"]
+
+    with psycopg.connect(empty_db, autocommit=True) as c:
+        rows = c.execute("SELECT id, session_id, session_slug FROM events ORDER BY id").fetchall()
+        columns = [
+            r[0]
+            for r in c.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'events'"
+            ).fetchall()
+        ]
+        names = [
+            r[0]
+            for r in c.execute(
+                "SELECT indexname FROM pg_indexes WHERE tablename = 'events' "
+                "UNION ALL SELECT conname FROM pg_constraint WHERE conrelid = 'events'::regclass"
+            ).fetchall()
+        ]
+    assert rows == [(ids[0], "c1", "wh-1"), (ids[1], None, None)]
+    assert {"session_id", "session_slug"} <= set(columns)
+    assert [n for n in columns + names if "cluster" in n] == []

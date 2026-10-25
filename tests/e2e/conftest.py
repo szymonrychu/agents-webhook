@@ -227,8 +227,8 @@ class Stack:
     def wait_status(self, id: int, status: str) -> dict[str, Any]:
         def probe():
             row = self.event(id)
-            # an in-progress row is running once its cluster and message are recorded
-            running = status != "in-progress" or (row["message_id"] and row["cluster_slug"])
+            # an in-progress row is running once its session and message are recorded
+            running = status != "in-progress" or (row["message_id"] and row["session_slug"])
             return row if row["status"] == status and running else None
 
         try:

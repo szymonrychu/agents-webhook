@@ -250,6 +250,8 @@ curl -X DELETE -H "$AUTH" $API/endpoints/1
 
 Lists events newest first. Query: `status` (`new`, `in-progress`, `handled`, `ignored`, `failed`), `endpoint_id`, `limit` (1 to 200, default 50), `before_id` (keyset paging). Response 200: an array of event views (no payload).
 
+An event view carries `id`, `received_at`, `updated_at`, `endpoint_id`, `endpoint_suffix`, `type`, `source`, `kind`, `action`, `repo`, `number`, `title`, `url`, `author`, `status`, `reason`, `dedup_key`, `deliveries`, `preset_id`, `session_id` and `session_slug` (the agent session the run started or was delivered to, null until then), `message_id`, `update_of`, `duplicate_of`, `started_at` and `finished_at`.
+
 ```
 curl -H "$AUTH" "$API/events?status=failed&limit=20"
 ```

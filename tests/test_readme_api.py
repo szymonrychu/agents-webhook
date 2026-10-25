@@ -9,6 +9,7 @@ from fastapi.routing import APIRoute
 
 from agents_webhook.api import openapi
 from agents_webhook.api.app import create_api_app
+from agents_webhook.api.schemas import EventView
 from agents_webhook.settings import WebhookSettings
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -101,3 +102,11 @@ def test_template_language_documented() -> None:
         "port-forward",
     ):
         assert needle in text, f"README does not mention {needle}"
+
+
+def test_event_view_fields_documented() -> None:
+    block = section("API").split("### `GET /webhooks/api/v1/events`", 1)[1].split("\n### ", 1)[0]
+    assert "An event view carries" in block, "README does not list the event view fields"
+    documented = re.findall(r"`([a-z_]+)`", block.split("An event view carries", 1)[1])
+    assert set(EventView.model_fields) <= set(documented), "README event view fields drifted"
+    assert not [f for f in documented if "cluster" in f]
