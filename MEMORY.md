@@ -1,3 +1,11 @@
 # agents-webhook memory
 
 Lessons that outlive a session. Newest first.
+
+- 2026-10-25: events about the same item are deduplicated per endpoint by `dedup_key` (repo, kind, number; Grafana: alert group digest). A queued `new` row is replaced by the newest delivery (latest wins) and the older delivery is recorded `ignored/duplicate`; the same delivery id again is `duplicate` too (D5). Why: bursts of edits should start one run with the latest data.
+- 2026-10-25: agent reuse is opt-in per preset (`reuse_running_agent`, D16). A queued event of an item with an earlier run is posted as an update to that run's running cluster, bypassing the caps; a gone or refusing cluster falls back once to a new cluster, recorded as `reuse_fallback`. Why: reuse changes what an agent sees, so the operator chooses it per preset; default off keeps one cluster per event.
+- 2026-10-25: limits are settings with defaults 3 in progress overall, 1 per endpoint, queue cap 500, body cap 5 MiB (D6), set from chart `limits.*`. Over-cap bodies get 413 after authentication; a full queue records `ignored/queue_full` rather than refusing the sender.
+- 2026-10-25: ingest and api are separate Deployments of one image (D2). Why: ingest is public without SSO and must hold no orchestrator token and expose no management routes; api is behind SSO. The worker is a singleton by advisory lock.
+- 2026-10-25: per-webhook endpoints (`/webhook/<suffix>`, one type, one preset, basic auth) replace per-source secrets and mappings (D3, D7). Why: GitHub, GitLab and Grafana all can send basic auth in the URL or contact point, and one endpoint per use case needs no mapping layer. Passwords are scrypt-hashed and shown once; unknown suffix and wrong credentials answer identically.
+- 2026-10-25: dispatch is idempotent through a marker in the posted prompt (D8): a crash between create-cluster and post resumes without a second cluster or a second prompt (`runs.dispatch`, `runs.deliver` adopt before posting).
+- 2026-10-25: `WEBHOOK_EVENTS_RETENTION_DAYS` is declared in settings but nothing prunes events yet.
