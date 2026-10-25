@@ -213,6 +213,93 @@ async def test_accepted_classified_ignore_reason_stored(client, conn, make_hook)
     assert (await events.get_event(conn, body["id"])).reason == "action_ignored"
 
 
+FILTER_DENY = {"deny": [{"field": "title", "match": "regex", "values": ["^Fix"]}]}
+FILTER_DENY_MISS = {"deny": [{"field": "title", "match": "regex", "values": ["^WIP"]}]}
+
+
+@pytest.fixture
+def notify_spy(monkeypatch) -> list[str]:
+    sent: list[str] = []
+
+    async def spy(conn, channel, payload):
+        sent.append(payload)
+
+    monkeypatch.setattr(ingest_app, "notify", spy)
+    return sent
+
+
+FILTER_ALLOW = {"allow": [{"field": "repo", "values": ["nobody/else"]}]}
+
+
+async def test_deny_filter_ignores_delivery(client, conn, make_hook, notify_spy):
+    hook = await make_hook("github-pr", filters=FILTER_DENY)
+    resp = await post(client, hook, p.gh_headers("pull_request"), p.gh_pull_request())
+    assert resp.status_code == 202
+    body = resp.json()
+    assert (body["status"], body["reason"]) == ("ignored", "filter_denied: title")
+    row = await events.get_event(conn, body["id"])
+    assert (row.status, row.reason) == ("ignored", "filter_denied: title")
+    assert notify_spy == []
+
+
+async def test_allow_filter_miss_ignores_delivery(client, conn, make_hook):
+    hook = await make_hook("github-pr", filters=FILTER_ALLOW)
+    resp = await post(client, hook, p.gh_headers("pull_request"), p.gh_pull_request())
+    assert resp.status_code == 202
+    body = resp.json()
+    assert (body["status"], body["reason"]) == ("ignored", "filter_not_allowed: repo")
+    assert (await events.get_event(conn, body["id"])).status == "ignored"
+
+
+async def test_passing_filters_queues_delivery(client, conn, make_hook, notify_spy):
+    filters = {**FILTER_DENY_MISS, "allow": [{"field": "kind", "values": ["mr"]}]}
+    hook = await make_hook("github-pr", filters=filters)
+    resp = await post(client, hook, p.gh_headers("pull_request"), p.gh_pull_request())
+    assert resp.status_code == 202
+    body = resp.json()
+    assert (body["status"], body["reason"]) == ("new", None)
+    assert notify_spy == [str(body["id"])]
+
+
+async def test_builtin_reason_wins_over_filter(client, conn, make_hook):
+    filters = {"deny": [{"field": "action", "values": ["closed"]}]}
+    hook = await make_hook("github-pr", filters=filters)
+    payload = p.gh_pull_request(action="closed")
+    resp = await post(client, hook, p.gh_headers("pull_request"), payload)
+    assert resp.status_code == 202
+    assert resp.json()["reason"] == "action_ignored"
+
+
+async def test_filters_never_run_before_auth(client, conn, make_hook, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ingest_app.filters, "evaluate", lambda *a: calls.append(a))
+    hook = await make_hook("github-pr", filters=FILTER_DENY)
+    resp = await post(
+        client, hook, p.gh_headers("pull_request"), p.gh_pull_request(), auth=basic("x", "y")
+    )
+    assert resp.status_code == 401
+    assert calls == []
+
+
+async def test_filter_error_never_crashes_ingest(client, conn, make_hook, monkeypatch):
+    def boom(*_a):
+        raise RuntimeError("secret rule text")
+
+    monkeypatch.setattr(ingest_app.filters, "evaluate", boom)
+    hook = await make_hook("github-pr", filters=FILTER_DENY)
+    resp = await post(client, hook, p.gh_headers("pull_request"), p.gh_pull_request())
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "ignored"
+    assert resp.json()["reason"] == "filter_error"
+
+
+async def test_filters_skipped_for_type_mismatch(client, conn, make_hook):
+    filters = {"allow": [{"field": "repo", "values": ["z/z"]}]}
+    hook = await make_hook("github-issue", filters=filters)
+    resp = await post(client, hook, p.gh_headers("pull_request"), p.gh_pull_request())
+    assert resp.json()["reason"] == "type_mismatch"
+
+
 async def test_accepted_bot_actor_is_self_event(pool, conn, make_hook):
     app = create_ingest_app(make_settings(bot_logins=["alice"]), pool)
     hook = await make_hook("github-pr")

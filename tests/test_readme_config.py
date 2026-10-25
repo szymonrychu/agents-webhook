@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from agents_webhook.filters import FIELDS
 from agents_webhook.normalize import ENDPOINT_TYPES
 from agents_webhook.settings import LocalSettings, WebhookSettings
 from agents_webhook.worker import REUSE_FALLBACK
@@ -18,6 +19,9 @@ REASONS = (
     "self_event",
     "author_not_allowed",
     "resolved",
+    "filter_denied",
+    "filter_not_allowed",
+    "filter_error",
     "action_ignored",
     "type_mismatch",
     "unsupported_event",
@@ -69,6 +73,7 @@ def test_every_endpoint_type_is_documented(kind):
         "Overview",
         "Configuration",
         "Endpoints",
+        "Filters",
         "Agent reuse",
         "Statuses and reasons",
         "Security",
@@ -80,3 +85,12 @@ def test_every_endpoint_type_is_documented(kind):
 )
 def test_sections_exist(title):
     assert section(title).strip()
+
+
+@pytest.mark.parametrize(
+    ("endpoint_type", "field"), [(t, f) for t, fs in FIELDS.items() for f in fs]
+)
+def test_filters_section_lists_every_field(endpoint_type, field):
+    text = section("Filters")
+    assert f"`{field}`" in text
+    assert f"`{endpoint_type}`" in text

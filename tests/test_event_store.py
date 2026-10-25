@@ -122,7 +122,7 @@ async def test_record_new_copies_endpoint_fields(conn, ep):
         "type_mismatch",
         "unsupported_event",
         "self_event",
-        "author_not_allowed",
+        "filter_not_allowed: author",
         "action_ignored",
         "resolved",
     ],

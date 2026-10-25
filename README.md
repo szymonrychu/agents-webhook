@@ -74,6 +74,7 @@ Each endpoint carries `filters = {"allow": [Rule], "deny": [Rule]}` with `Rule =
 
 - Order: the first deny rule (in list order) that matches ignores the event with `filter_denied: <field>`; otherwise the first allow rule that does not match ignores it with `filter_not_allowed: <field>`. Allow rules combine with AND, the values within one rule with OR.
 - Fields per type: `github-issue` and `gitlab-issue` offer `author`, `actor`, `repo`, `labels`, `title`, `body`, `comment`, `kind`, `action`; `github-pr` and `gitlab-mr` add `source_branch` and `target_branch`; `grafana-alert` offers `labels`, `title`, `body`. A field the event does not carry (for example `comment` on a non-comment event) never matches: it fails an allow rule and never trips a deny rule. A list field (forge `labels`) matches when any element matches.
+- Not applicable, and why: `grafana-alert` has no `author`, `actor`, `repo` or `comment` (alerts carry none), no `kind` (always an alert) and no `action` (a non-firing alert is already `resolved`); issue types have no `source_branch` or `target_branch` (issues have no branch), and a `issue_comment` on a pull request carries none either, so they are absent there. Not offered for any type: `number`, `url`, `draft`, `changed` (the built-in rules already decide drafts and title-only edits), the delivery id, the dedup key, the priority and the raw payload.
 - `equals` compares whole values: case-insensitively for `author`, `actor`, `repo` and forge `labels`, exactly for every other field.
 - `regex` is an unanchored search; anchor with `^...$`, use `(?i)` for case-insensitivity. Patterns use RE2 syntax (the `google-re2` engine): matching takes time linear in the text, and backreferences and lookaround are refused when the filters are saved.
 - Grafana `labels` values are `key=value` (split on the first `=`, non-empty key) and match the alert group's common labels: `equals` compares the label's value exactly, `regex` searches it with the part after `=`. A key the alert group does not carry never matches.
@@ -101,6 +102,9 @@ An event has one of five statuses: `new` (queued), `in-progress` (claimed, runni
 | `action_ignored` | `ignored` | an action that starts no work (closed, labeled, draft merge request, title-only edit) |
 | `type_mismatch` | `ignored` | a provider event of another endpoint type |
 | `unsupported_event` | `ignored` | not a supported provider event |
+| `filter_denied` | `ignored` | a deny rule of the endpoint matched; written `filter_denied: <field>` |
+| `filter_not_allowed` | `ignored` | an allow rule of the endpoint did not match; written `filter_not_allowed: <field>` |
+| `filter_error` | `ignored` | the endpoint's filters could not be evaluated (fails closed; never expected after saving) |
 | `duplicate` | `ignored` | the same delivery id again, or a queued event replaced by a newer one |
 | `queue_full` | `ignored` | `WEBHOOK_MAX_QUEUE` queued events reached |
 | `endpoint_removed` | `ignored` | the endpoint was deleted while the event was queued |
@@ -156,7 +160,7 @@ mise run test:e2e    # end-to-end tests
 
 ## Ingest
 
-`POST /webhook/{suffix}` is the only ingest path. It is served by the public `ingest` Deployment (no SSO). Each endpoint has a type (`grafana-alert`, `gitlab-issue`, `gitlab-mr`, `github-issue`, `github-pr`), a preset, an optional prompt template and HTTP basic-auth credentials.
+`POST /webhook/{suffix}` is the only ingest path. It is served by the public `ingest` Deployment (no SSO). After authentication, the body cap, JSON parsing, normalize and the built-in rules (`classify`), the endpoint's filters (see Filters) run; a built-in reason wins over a filter. A delivery that fails a filter is accepted (202) and stored `ignored` with the reason, never queued. Each endpoint has a type (`grafana-alert`, `gitlab-issue`, `gitlab-mr`, `github-issue`, `github-pr`), a preset, an optional prompt template and HTTP basic-auth credentials.
 
 | Status | Meaning |
 |---|---|
