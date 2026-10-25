@@ -227,8 +227,8 @@ class Stack:
     def wait_status(self, id: int, status: str) -> dict[str, Any]:
         def probe():
             row = self.event(id)
-            # an in-progress row is running once its cluster and message are recorded
-            running = status != "in-progress" or (row["message_id"] and row["cluster_slug"])
+            # an in-progress row is running once its session and message are recorded
+            running = status != "in-progress" or (row["message_id"] and row["session_slug"])
             return row if row["status"] == status and running else None
 
         try:
@@ -236,14 +236,14 @@ class Stack:
         except pytest.fail.Exception:
             pytest.fail(f"event {id} is {self.event(id)['status']}, expected {status}")
 
-    def cluster(self, slug: str) -> dict[str, Any]:
+    def session(self, slug: str) -> dict[str, Any]:
         return wait_for(
-            lambda: next((c for c in self.fake.clusters.values() if c["slug"] == slug), None),
-            f"cluster {slug}",
+            lambda: next((c for c in self.fake.sessions.values() if c["slug"] == slug), None),
+            f"session {slug}",
         )
 
-    def messages(self, cluster_id: str) -> list[dict[str, Any]]:
-        return [m for m in self.fake.messages.values() if m["cluster_id"] == cluster_id]
+    def messages(self, session_id: str) -> list[dict[str, Any]]:
+        return [m for m in self.fake.messages.values() if m["session_id"] == session_id]
 
 
 def _started(admin_url: str, worker: bool, env: dict[str, str]) -> Stack:

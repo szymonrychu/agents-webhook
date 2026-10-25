@@ -8,7 +8,7 @@ import pytest
 from agents_common.db import open_pool
 from agents_common.fake_orchestrator import FakeOrchestrator
 from agents_common.orchestrator import OrchestratorClient
-from agents_common.runs import marker
+from agents_common.runs import RunStore, marker
 from agents_common.runtime import LostLock
 
 from agents_webhook import prompt, worker
@@ -152,14 +152,14 @@ async def statuses(conn, ids) -> list[str]:
     return [(await row(conn, i)).status for i in ids]
 
 
-def cluster_of(fake: FakeOrchestrator, slug: str) -> dict:
-    found = [c for c in fake.clusters.values() if c["slug"] == slug]
-    assert len(found) == 1, f"{len(found)} clusters with slug {slug}"
+def session_of(fake: FakeOrchestrator, slug: str) -> dict:
+    found = [c for c in fake.sessions.values() if c["slug"] == slug]
+    assert len(found) == 1, f"{len(found)} sessions with slug {slug}"
     return found[0]
 
 
-def messages_of(fake: FakeOrchestrator, cluster_id: str) -> list[dict]:
-    return [m for m in fake.messages.values() if m["cluster_id"] == cluster_id]
+def messages_of(fake: FakeOrchestrator, session_id: str) -> list[dict]:
+    return [m for m in fake.messages.values() if m["session_id"] == session_id]
 
 
 # --- happy path -----------------------------------------------------------------------------
@@ -174,11 +174,11 @@ async def test_happy_path_new_in_progress_handled(conn, fake, preset, make_endpo
 
     r = await row(conn, id)
     assert r.status == "in-progress"
-    assert r.cluster_slug == f"wh-{id}"
-    cluster = cluster_of(fake, f"wh-{id}")
-    assert r.cluster_id == cluster["id"]
-    assert cluster["preset_id"] == preset
-    msgs = messages_of(fake, cluster["id"])
+    assert r.session_slug == f"wh-{id}"
+    session = session_of(fake, f"wh-{id}")
+    assert r.session_id == session["id"]
+    assert session["preset_id"] == preset
+    msgs = messages_of(fake, session["id"])
     assert len(msgs) == 1
     assert r.message_id == str(msgs[0]["id"])
     expected = prompt.render(events.to_normalized(r), None)
@@ -194,7 +194,7 @@ async def test_happy_path_new_in_progress_handled(conn, fake, preset, make_endpo
     assert r.status == "handled"
     assert r.reason is None
     assert r.finished_at is not None
-    assert len(fake.clusters) == 1
+    assert len(fake.sessions) == 1
 
 
 async def test_happy_path_posts_the_endpoint_template(conn, fake, make_endpoint, make_worker):
@@ -203,8 +203,8 @@ async def test_happy_path_posts_the_endpoint_template(conn, fake, make_endpoint,
 
     await make_worker().tick()
 
-    cluster = cluster_of(fake, f"wh-{id}")
-    [msg] = messages_of(fake, cluster["id"])
+    session = session_of(fake, f"wh-{id}")
+    [msg] = messages_of(fake, session["id"])
     assert msg["text"] == (
         f"Please fix Fix the thing in o/r (from-payload)\n\n{marker('webhook:event', id)}"
     )
@@ -221,7 +221,7 @@ async def test_happy_notify_wakes_the_loop(db, conn, fake, pool, client, make_en
         id = await rec(conn, ep)
         await conn.execute("SELECT pg_notify('webhook_events', %s)", (str(id),))
         await _until(lambda: _status(conn, id), "in-progress", timeout=5)
-        cluster_of(fake, f"wh-{id}")
+        session_of(fake, f"wh-{id}")
     finally:
         stop.set()
         await asyncio.wait_for(task, 5)
@@ -251,7 +251,7 @@ async def test_caps_overall_fourth_waits_fifo(conn, fake, make_endpoint, make_wo
         "in-progress",
         "new",
     ]
-    assert len(fake.clusters) == 4
+    assert len(fake.sessions) == 4
 
 
 async def test_caps_per_endpoint_one_after_the_other(conn, fake, make_endpoint, make_worker):
@@ -266,13 +266,13 @@ async def test_caps_per_endpoint_one_after_the_other(conn, fake, make_endpoint, 
     fake.complete_turn(int((await row(conn, first)).message_id), "ok")
     await w.tick()
     assert await statuses(conn, [first, second]) == ["handled", "in-progress"]
-    cluster_of(fake, f"wh-{second}")
+    session_of(fake, f"wh-{second}")
 
 
 # --- same key, reuse off --------------------------------------------------------------------
 
 
-async def test_same_key_waits_then_starts_its_own_cluster(conn, fake, make_endpoint, make_worker):
+async def test_same_key_waits_then_starts_its_own_session(conn, fake, make_endpoint, make_worker):
     ep = await make_endpoint()
     first = await rec(conn, ep)
     w = make_worker(max_in_progress=5, max_in_progress_per_endpoint=5)
@@ -286,42 +286,58 @@ async def test_same_key_waits_then_starts_its_own_cluster(conn, fake, make_endpo
     await w.tick()
     assert await statuses(conn, [first, second]) == ["handled", "in-progress"]
     a, b = await row(conn, first), await row(conn, second)
-    assert b.cluster_slug == f"wh-{second}"
-    assert b.cluster_id != a.cluster_id
+    assert b.session_slug == f"wh-{second}"
+    assert b.session_id != a.session_id
     assert b.update_of is None
-    assert len(fake.clusters) == 2
+    assert len(fake.sessions) == 2
 
 
 # --- restart --------------------------------------------------------------------------------
+
+
+def test_run_stores_record_the_session(make_worker):
+    """The stores the worker hands agents-common are its RunStore; set_session records it."""
+    w = make_worker()
+    assert isinstance(w.run_store, RunStore) and isinstance(w._fallback_store, RunStore)
+
+
+@pytest.mark.parametrize("store", ["run_store", "_fallback_store"])
+async def test_run_store_set_session_records_session(conn, make_endpoint, make_worker, store):
+    ep = await make_endpoint()
+    id = await rec(conn, ep)
+    await events.claim_next(conn, max_in_progress=9, max_per_endpoint=9, reuse_endpoints=set())
+    await getattr(make_worker(), store).set_session(id, "s1")
+    r = await row(conn, id)
+    assert (r.session_id, r.session_slug) == ("s1", f"wh-{id}")
 
 
 class Crash(Exception):
     pass
 
 
-async def test_restart_after_create_makes_no_second_cluster(
+async def test_restart_after_create_makes_no_second_session(
     conn, fake, make_endpoint, make_worker, monkeypatch
 ):
     ep = await make_endpoint()
     id = await rec(conn, ep)
-    original = events.EventStore.set_cluster
+    original = events.EventStore.set_session
 
-    async def crash(self, run_id, cluster_id, *, slug=None):
+    async def crash(self, run_id, session_id, *, slug=None):
         raise Crash("killed after create")
 
-    monkeypatch.setattr(events.EventStore, "set_cluster", crash)
+    monkeypatch.setattr(events.EventStore, "set_session", crash)
     with pytest.raises(Crash):
         await make_worker().tick()
-    assert len(fake.clusters) == 1
+    assert len(fake.sessions) == 1
     r = await row(conn, id)
-    assert (r.status, r.cluster_id, r.message_id) == ("in-progress", None, None)
+    assert (r.status, r.session_id, r.message_id) == ("in-progress", None, None)
 
-    monkeypatch.setattr(events.EventStore, "set_cluster", original)
+    monkeypatch.setattr(events.EventStore, "set_session", original)
     await make_worker().tick()
 
-    assert len(fake.clusters) == 1
+    assert len(fake.sessions) == 1
     r = await row(conn, id)
-    assert r.cluster_id == cluster_of(fake, f"wh-{id}")["id"]
+    assert r.session_id == session_of(fake, f"wh-{id}")["id"]
     assert len(fake.messages) == 1
     assert r.message_id == str(next(iter(fake.messages)))
 
@@ -340,14 +356,14 @@ async def test_restart_after_post_makes_no_second_message(
     with pytest.raises(Crash):
         await make_worker().tick()
     r = await row(conn, id)
-    assert r.cluster_id is not None and r.message_id is None
+    assert r.session_id is not None and r.message_id is None
     assert len(fake.messages) == 1
 
     monkeypatch.setattr(events.EventStore, "set_message", original)
     await make_worker().tick()
 
     r = await row(conn, id)
-    assert len(fake.clusters) == 1
+    assert len(fake.sessions) == 1
     assert len(fake.messages) == 1
     assert r.message_id == str(next(iter(fake.messages)))
     fake.complete_turn(int(r.message_id), "ok")
@@ -369,7 +385,7 @@ async def test_restart_resumes_before_new_claims(conn, fake, make_endpoint, make
 
     assert await statuses(conn, [id, other]) == ["in-progress", "new"]
     assert (await row(conn, id)).message_id is not None
-    assert len(fake.clusters) == 1
+    assert len(fake.sessions) == 1
 
 
 # --- failed paths ---------------------------------------------------------------------------
@@ -384,7 +400,7 @@ async def test_failed_preset_missing(conn, fake, make_endpoint, make_worker):
     r = await row(conn, id)
     assert (r.status, r.reason) == ("failed", "preset_not_found")
     assert r.finished_at is not None
-    assert fake.clusters == {}
+    assert fake.sessions == {}
 
 
 async def test_failed_4xx_on_create_or_post_records_the_code(
@@ -392,7 +408,7 @@ async def test_failed_4xx_on_create_or_post_records_the_code(
 ):
     first = await rec(conn, await make_endpoint())
     second = await rec(conn, await make_endpoint())
-    fake.fail_next("create_cluster", 422)
+    fake.fail_next("create_session", 422)
     fake.fail_next("post_message", 400)
 
     await make_worker(max_in_progress=1).tick()
@@ -401,7 +417,7 @@ async def test_failed_4xx_on_create_or_post_records_the_code(
     a, b = await row(conn, first), await row(conn, second)
     assert (a.status, a.reason) == ("failed", "internal")
     assert (b.status, b.reason) == ("failed", "internal")
-    assert b.cluster_id is not None
+    assert b.session_id is not None
     assert fake.messages == {}
 
 
@@ -416,6 +432,34 @@ async def test_failed_turn(conn, fake, make_endpoint, make_worker):
     r = await row(conn, id)
     assert r.status == "failed"
     assert r.reason == "message_failed"
+
+
+@pytest.mark.parametrize("gone", ["while_tracking", "before_post"])
+async def test_missing_session_reason(conn, fake, make_endpoint, make_worker, monkeypatch, gone):
+    """The run's session disappears: the event fails `session_not_found`."""
+    id = await rec(conn, await make_endpoint())
+    if gone == "before_post":  # the session is recorded, the worker dies before the post
+        original = events.EventStore.set_message
+
+        async def crash(self, run_id, message_id):
+            raise Crash("killed after post")
+
+        monkeypatch.setattr(events.EventStore, "set_message", crash)
+        with pytest.raises(Crash):
+            await make_worker().tick()
+        monkeypatch.setattr(events.EventStore, "set_message", original)
+    else:
+        await make_worker().tick()
+    r = await row(conn, id)
+    assert r.session_id is not None
+    fake.remove_session(r.session_id)
+
+    await make_worker().tick()
+
+    r = await row(conn, id)
+    assert (r.status, r.reason) == ("failed", "session_not_found")
+    assert r.finished_at is not None
+    assert fake.sessions == {}
 
 
 async def test_failed_timeout(conn, fake, make_endpoint, make_worker):
@@ -439,7 +483,7 @@ async def test_failed_template_error(conn, fake, make_endpoint, make_worker):
 
     r = await row(conn, id)
     assert (r.status, r.reason) == ("failed", "template_error")
-    assert fake.clusters == {}
+    assert fake.sessions == {}
 
 
 async def test_failed_orchestrator_down_leaves_rows_then_recovers(
@@ -456,8 +500,8 @@ async def test_failed_orchestrator_down_leaves_rows_then_recovers(
 
     # The endpoint's preset cannot be read: its rows are not claimed this tick.
     r = await row(conn, id)
-    assert (r.status, r.reason, r.cluster_id, r.message_id) == ("new", None, None, None)
-    assert fake.clusters == {}
+    assert (r.status, r.reason, r.session_id, r.message_id) == ("new", None, None, None)
+    assert fake.sessions == {}
     unavailable = [m for m in caplog.messages if "unavailable" in m and f"endpoint {ep.id}" in m]
     assert len(unavailable) == 1
 
@@ -474,7 +518,7 @@ async def test_failed_orchestrator_down_leaves_rows_then_recovers(
     fake.complete_turn(int(r.message_id), "ok")
     await w.tick()
     assert (await row(conn, id)).status == "handled"
-    assert len(fake.clusters) == 1 and len(fake.messages) == 1
+    assert len(fake.sessions) == 1 and len(fake.messages) == 1
 
 
 async def test_failed_create_unavailable_leaves_the_row_in_progress(
@@ -482,16 +526,16 @@ async def test_failed_create_unavailable_leaves_the_row_in_progress(
 ):
     id = await rec(conn, await make_endpoint())
     w = make_worker()
-    fake.fail_next("create_cluster", 503)
+    fake.fail_next("create_session", 503)
 
     await w.tick()
     r = await row(conn, id)
-    assert (r.status, r.reason, r.cluster_id, r.message_id) == ("in-progress", None, None, None)
-    assert fake.clusters == {}
+    assert (r.status, r.reason, r.session_id, r.message_id) == ("in-progress", None, None, None)
+    assert fake.sessions == {}
 
     await w.tick()
     r = await row(conn, id)
-    assert r.cluster_id == cluster_of(fake, f"wh-{id}")["id"] and r.message_id is not None
+    assert r.session_id == session_of(fake, f"wh-{id}")["id"] and r.message_id is not None
 
 
 # --- route hook -----------------------------------------------------------------------------
@@ -511,7 +555,7 @@ async def test_route_hook_true_skips_first_dispatch(
     await Routed(settings, pool, client).tick()
 
     assert seen == [id]
-    assert fake.clusters == {}
+    assert fake.sessions == {}
     assert (await row(conn, id)).status == "in-progress"
 
 
@@ -561,7 +605,7 @@ async def test_singleton_only_one_worker_dispatches(db, conn, fake, make_endpoin
         for id in ids:
             await _until(lambda id=id: _status(conn, id), "in-progress", timeout=5)
         await asyncio.sleep(0.3)
-        assert len(fake.clusters) == 3
+        assert len(fake.sessions) == 3
         assert second_switch.calls == 0
         assert first_switch.calls > 0
 
@@ -570,7 +614,7 @@ async def test_singleton_only_one_worker_dispatches(db, conn, fake, make_endpoin
         late = await rec(conn, ep, ev("late"))
         await _until(lambda: _status(conn, late), "in-progress", timeout=5)
         assert second_switch.calls > 0
-        assert len(fake.clusters) == 4
+        assert len(fake.sessions) == 4
         second_stop.set()
         await asyncio.wait_for(second, 5)
     finally:
@@ -672,8 +716,8 @@ async def test_worker_context_matches_preview_for_draft_and_changed(
 
     await make_worker().tick()
 
-    cluster = cluster_of(fake, f"wh-{recorded.id}")
-    [msg] = messages_of(fake, cluster["id"])
+    session = session_of(fake, f"wh-{recorded.id}")
+    [msg] = messages_of(fake, session["id"])
     expected = prompt.preview(template, PAYLOAD, event)
     assert expected == "draft=True changed=description,title Fix the thing"
     assert msg["text"] == f"{expected}\n\n{marker('webhook:event', recorded.id)}"

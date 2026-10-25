@@ -249,28 +249,6 @@
             ],
             "title": "Author"
           },
-          "cluster_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cluster Id"
-          },
-          "cluster_slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cluster Slug"
-          },
           "dedup_key": {
             "title": "Dedup Key",
             "type": "string"
@@ -391,6 +369,28 @@
             ],
             "title": "Repo"
           },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "session_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Slug"
+          },
           "source": {
             "title": "Source",
             "type": "string"
@@ -474,8 +474,8 @@
           "dedup_key",
           "deliveries",
           "preset_id",
-          "cluster_id",
-          "cluster_slug",
+          "session_id",
+          "session_slug",
           "message_id",
           "update_of",
           "duplicate_of",
@@ -510,28 +510,6 @@
               }
             ],
             "title": "Author"
-          },
-          "cluster_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cluster Id"
-          },
-          "cluster_slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cluster Slug"
           },
           "dedup_key": {
             "title": "Dedup Key",
@@ -647,6 +625,28 @@
             ],
             "title": "Repo"
           },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "session_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Slug"
+          },
           "source": {
             "title": "Source",
             "type": "string"
@@ -730,8 +730,8 @@
           "dedup_key",
           "deliveries",
           "preset_id",
-          "cluster_id",
-          "cluster_slug",
+          "session_id",
+          "session_slug",
           "message_id",
           "update_of",
           "duplicate_of",

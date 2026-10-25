@@ -2,15 +2,15 @@
 
 Part of the agents-webhook-component project (python).
 
-Webhook endpoints that turn provider events (GitHub, GitLab, Grafana) into prompts for agents run by agent-orchestrator. One image, four subcommands: `migrate`, `ingest` (public listener), `api` (UI API) and `worker` (dispatcher).
+Webhook endpoints that turn provider events (GitHub, GitLab, Grafana) into prompts for agents run by agents-orchestrator. One image, four subcommands: `migrate`, `ingest` (public listener), `api` (UI API) and `worker` (dispatcher).
 
 ## Overview
 
-agents-webhook turns provider events into prompts for agents run by agent-orchestrator. One image, four processes (subcommands):
+agents-webhook turns provider events into prompts for agents run by agents-orchestrator. One image, four processes (subcommands):
 
 - `ingest`: the public listener for `POST /webhook/{suffix}`. It authenticates, normalizes and records the event in Postgres and answers 202; it never talks to the orchestrator and holds no orchestrator token.
 - `api`: the UI API under `/webhooks/api/v1`, behind SSO. It manages endpoints and reads events.
-- `worker`: the single dispatcher (one advisory-lock holder). It claims queued events within the limits and creates or reuses agent clusters through the orchestrator.
+- `worker`: the single dispatcher (one advisory-lock holder). It claims queued events within the limits and creates or reuses agent sessions through the orchestrator.
 - `migrate`: applies database migrations and exits.
 
 The queue is the `events` table in the service's own Postgres: ingest writes `new` rows and sends `NOTIFY webhook_events`, the worker claims them with status-guarded updates. Services share no other state.
@@ -40,7 +40,7 @@ Every setting is an environment variable. The first block is read by all subcomm
 | `WEBHOOK_HTTP_HOST` | `0.0.0.0` | listen address |
 | `WEBHOOK_HTTP_PORT` | 8000 | listen port |
 | `WEBHOOK_LOG_LEVEL` | `INFO` | log level |
-| `WEBHOOK_ORCHESTRATOR_URL` | required for `api`, `worker` | agent-orchestrator base URL |
+| `WEBHOOK_ORCHESTRATOR_URL` | required for `api`, `worker` | the agents-orchestrator base URL |
 | `WEBHOOK_ORCHESTRATOR_TOKEN` | empty | service token for the orchestrator (`api`, `worker`) |
 | `WEBHOOK_ORCHESTRATOR_TOKEN_FILE` | empty | file holding the token; wins over the variable |
 | `WEBHOOK_SHUTDOWN_GRACE_SECONDS` | 20 | graceful shutdown time |
@@ -88,10 +88,10 @@ An author allowlist is an endpoint `allow` rule on `author` (for example `{"fiel
 
 Each agent preset has a boolean `reuse_running_agent`, off by default. When it is on for an endpoint's preset, events about the same item (the same repository and issue or merge request number, or the same alert group, which is the event's dedup key on that endpoint) go to the agent already working on that item:
 
-- A queued event whose item has an earlier run is delivered as an update message to that run's cluster instead of creating a new one. A cluster counts as running while it exists and its desired state is `active` (its first turn may still be running or already complete). The event is handled once the message is sent; it bypasses the in-progress limits.
-- Ordering: events of one item are processed in order. An update waits while an earlier event of the same item is still without a cluster or has an update in flight. With reuse off, any in-progress event of the same item blocks the next one.
-- Fallback: when the cluster is gone, refuses the message, or cancels or fails the message before it is sent, the event falls back once to a new cluster `wh-<id>` (when the limits allow, else it returns to the queue in its place). If a fallback event then fails, its reason is `reuse_fallback` (for example `reuse_fallback: turn_failed`).
-- With reuse off every event starts a new cluster. The service never deletes clusters.
+- A queued event whose item has an earlier run is delivered as an update message to that run's session instead of creating a new one. A session counts as running while it exists and its desired state is `active` (its first turn may still be running or already complete). The event is handled once the message is sent; it bypasses the in-progress limits.
+- Ordering: events of one item are processed in order. An update waits while an earlier event of the same item is still without a session or has an update in flight. With reuse off, any in-progress event of the same item blocks the next one.
+- Fallback: when the session is gone, refuses the message, or cancels or fails the message before it is sent, the event falls back once to a new session `wh-<id>` (when the limits allow, else it returns to the queue in its place). If a fallback event then fails, its reason is `reuse_fallback` (for example `reuse_fallback: turn_failed`).
+- With reuse off every event starts a new session. The service never deletes sessions.
 
 ## Statuses and reasons
 
@@ -111,7 +111,7 @@ An event has one of five statuses: `new` (queued), `in-progress` (claimed, runni
 | `queue_full` | `ignored` | `WEBHOOK_MAX_QUEUE` queued events reached |
 | `endpoint_removed` | `ignored` | the endpoint was deleted while the event was queued |
 | `preset_not_found` | `failed` | the orchestrator no longer has the preset |
-| `cluster_not_found` | `failed` | the run's cluster disappeared |
+| `session_not_found` | `failed` | the run's session disappeared |
 | `template_error` | `failed` | the prompt template failed to render |
 | `timeout` | `failed` | older than `WEBHOOK_RUN_TIMEOUT_SECONDS` without finishing |
 | `turn_failed` | `failed` | the agent turn failed |
@@ -119,7 +119,7 @@ An event has one of five statuses: `new` (queued), `in-progress` (claimed, runni
 | `message_cancelled` | `failed` | the prompt message was cancelled |
 | `reuse_fallback` | `failed` | a fallback after a failed agent reuse failed; carried as a prefix |
 
-A 4xx from the orchestrator when creating a cluster or posting fails the event with the error code it returned.
+A 4xx from the orchestrator when creating a session or posting fails the event with the error code it returned.
 
 ## Security
 
@@ -249,6 +249,8 @@ curl -X DELETE -H "$AUTH" $API/endpoints/1
 ### `GET /webhooks/api/v1/events`
 
 Lists events newest first. Query: `status` (`new`, `in-progress`, `handled`, `ignored`, `failed`), `endpoint_id`, `limit` (1 to 200, default 50), `before_id` (keyset paging). Response 200: an array of event views (no payload).
+
+An event view carries `id`, `received_at`, `updated_at`, `endpoint_id`, `endpoint_suffix`, `type`, `source`, `kind`, `action`, `repo`, `number`, `title`, `url`, `author`, `status`, `reason`, `dedup_key`, `deliveries`, `preset_id`, `session_id` and `session_slug` (the agent session the run started or was delivered to, null until then), `message_id`, `update_of`, `duplicate_of`, `started_at` and `finished_at`.
 
 ```
 curl -H "$AUTH" "$API/events?status=failed&limit=20"

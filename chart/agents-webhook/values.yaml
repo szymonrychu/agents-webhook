@@ -14,7 +14,7 @@ postgres:
   existingSecret: ""
   existingSecretKey: uri
 
-# The agent-orchestrator the worker and api talk to. url is required; set token or tokenSecret
+# The agents-orchestrator the worker and api talk to. url is required; set token or tokenSecret
 # (tokenSecret wins). The ingest pod never receives the token.
 orchestrator:
   url: ""

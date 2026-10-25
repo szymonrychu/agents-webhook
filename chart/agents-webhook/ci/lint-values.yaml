@@ -3,7 +3,7 @@ image:
 postgres:
   url: postgresql://db:5432/webhook
 orchestrator:
-  url: http://agent-orchestrator.agents.svc
+  url: http://agents-orchestrator.agents.svc
   token: lint-token
 ingress:
   enabled: true

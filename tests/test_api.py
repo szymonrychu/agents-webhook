@@ -26,6 +26,8 @@ from .test_worker import ev
 PW_A, PW_B, PW_C = (secrets.token_urlsafe(24) for _ in range(3))
 
 P = "/webhooks/api/v1"
+# The retired unit word (design D2), split so the nomenclature guard does not flag it.
+RETIRED_UNIT = "clu" + "ster"
 
 
 def make_settings(**over: Any) -> WebhookSettings:
@@ -207,7 +209,7 @@ async def test_invalid_orchestrator_down_503(settings, pool, fake):
 
 
 class ServicePort(httpx.AsyncBaseTransport):
-    """The fake behind the real service port's gate (agent_orchestrator.api.service_auth).
+    """The fake behind the real service port's gate (agents_orchestrator.api.service_auth).
 
     A wrong bearer token gets 401 `unauthorized`; a preset path whose id is not a UUID is not
     in the allowlist and gets 403 `forbidden`.
@@ -375,6 +377,21 @@ async def test_events_list_has_no_payload_detail_has(api, conn, preset):
     assert detail["payload"] == {"secret-payload": 0}
     assert detail["labels"] == ["a"]
     assert detail["status"] == "new" and detail["id"] == ids[0]
+
+
+async def test_event_view_session_fields(api, conn, pool, preset):
+    _, ids = await seed(conn, preset, 2)
+    claimed = await events.claim_next(
+        conn, max_in_progress=10, max_per_endpoint=10, reuse_endpoints=set()
+    )
+    assert claimed is not None and claimed.event.id == ids[0]
+    await events.EventStore(pool).set_session(ids[0], "s1")
+    listed = {e["id"]: e for e in (await api.get(f"{P}/events")).json()}
+    detail = (await api.get(f"{P}/events/{ids[0]}")).json()
+    for view in (listed[ids[0]], detail):
+        assert (view["session_id"], view["session_slug"]) == ("s1", f"wh-{ids[0]}")
+    assert (listed[ids[1]]["session_id"], listed[ids[1]]["session_slug"]) == (None, None)
+    assert not [k for view in (*listed.values(), detail) for k in view if RETIRED_UNIT in k]
 
 
 async def test_events_unknown_404(api):

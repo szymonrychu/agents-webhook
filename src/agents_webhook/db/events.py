@@ -37,7 +37,7 @@ _COLUMNS = (
     "kind, action, repo, number, title, body, comment_body, url, author, actor, labels, payload, "
     "delivery_id, "
     "dedup_key, status, reason, preset_id, prompt_template, update_of, duplicate_of, deliveries, "
-    "cluster_id, cluster_slug, message_id, started_at, finished_at, draft, changed"
+    "session_id, session_slug, message_id, started_at, finished_at, draft, changed"
 )
 # Ignored rows keep at most this much of a payload; only `new` rows keep it whole.
 IGNORED_PAYLOAD_CAP = 4096
@@ -94,8 +94,8 @@ class Event:
     update_of: int | None
     duplicate_of: int | None
     deliveries: int
-    cluster_id: str | None
-    cluster_slug: str | None
+    session_id: str | None
+    session_slug: str | None
     message_id: str | None
     started_at: datetime | None
     finished_at: datetime | None
@@ -262,7 +262,7 @@ async def record(
 
 # --- claim ----------------------------------------------------------------------------------
 
-# Per-key order: a same-key row in progress without a cluster, or an update in flight, blocks;
+# Per-key order: a same-key row in progress without a session, or an update in flight, blocks;
 # without reuse any same-key row in progress blocks. A reuse candidate (reuse endpoint with a
 # prior run) bypasses the caps; any other row needs room under both.
 _PICK = """
@@ -272,14 +272,14 @@ WHERE e.status = 'new' AND (e.endpoint_id IS NULL OR (
         SELECT 1 FROM events b
         WHERE b.endpoint_id = e.endpoint_id AND b.dedup_key = e.dedup_key
           AND b.status = 'in-progress'
-          AND (b.cluster_id IS NULL OR b.update_of IS NOT NULL
+          AND (b.session_id IS NULL OR b.update_of IS NOT NULL
                OR NOT e.endpoint_id = ANY(%(reuse)s))
     )
     AND (
         (e.endpoint_id = ANY(%(reuse)s) AND EXISTS (
             SELECT 1 FROM events p
             WHERE p.endpoint_id = e.endpoint_id AND p.dedup_key = e.dedup_key
-              AND p.update_of IS NULL AND p.cluster_id IS NOT NULL))
+              AND p.update_of IS NULL AND p.session_id IS NOT NULL))
         OR (
             (SELECT count(*) FROM events c
              WHERE c.status = 'in-progress' AND c.update_of IS NULL) < %(cap)s
@@ -330,7 +330,7 @@ async def claim_next(
 
 
 async def mark_update(conn: psycopg.AsyncConnection, id: int, parent_id: int) -> bool:
-    """Mark an in-progress row as an update delivered to `parent_id`'s cluster."""
+    """Mark an in-progress row as an update delivered to `parent_id`'s session."""
     return await transition(conn, "events", id, "in-progress", "in-progress", update_of=parent_id)
 
 
@@ -343,8 +343,8 @@ async def clear_update(conn: psycopg.AsyncConnection, id: int) -> bool:
         "in-progress",
         "in-progress",
         update_of=None,
-        cluster_id=None,
-        cluster_slug=None,
+        session_id=None,
+        session_slug=None,
         message_id=None,
     )
 
@@ -386,7 +386,7 @@ async def release(conn: psycopg.AsyncConnection, id: int) -> bool:
         sets = ", ".join(f"{c} = n.{c}" for c in _LATEST)
         cur = await conn.execute(
             "UPDATE events r SET status = 'new', started_at = NULL, update_of = NULL, "
-            "cluster_id = NULL, cluster_slug = NULL, message_id = NULL"
+            "session_id = NULL, session_slug = NULL, message_id = NULL"
             + (
                 f", {sets}, updated_at = now(), deliveries = r.deliveries + n.deliveries "
                 "FROM events n WHERE n.id = %(newer)s AND "
@@ -402,18 +402,18 @@ async def release(conn: psycopg.AsyncConnection, id: int) -> bool:
 
 
 class EventStore:
-    """`agents_common.runs.RunStore` over the events table; every write is status-guarded."""
+    """The run store over the events table; every write is status-guarded."""
 
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool
 
-    async def set_cluster(self, run_id: RunId, cluster_id: str, *, slug: str | None = None) -> None:
-        """Record the cluster; `slug` defaults to the run's own `wh-<id>`."""
+    async def set_session(self, run_id: RunId, session_id: str, *, slug: str | None = None) -> None:
+        """Record the session; `slug` defaults to the run's own `wh-<id>`."""
         async with self._pool.connection() as conn:
             await conn.execute(
-                "UPDATE events SET cluster_id = %s, cluster_slug = COALESCE(%s, 'wh-' || id) "
+                "UPDATE events SET session_id = %s, session_slug = COALESCE(%s, 'wh-' || id) "
                 "WHERE id = %s AND status = 'in-progress'",
-                (cluster_id, slug, run_id),
+                (session_id, slug, run_id),
             )
 
     async def set_message(self, run_id: RunId, message_id: str) -> None:
@@ -539,11 +539,11 @@ async def in_progress(conn: psycopg.AsyncConnection) -> list[Event]:
 async def latest_run(
     conn: psycopg.AsyncConnection, endpoint_id: int | None, dedup_key: str
 ) -> Event | None:
-    """The newest first-dispatch row of the key that has a cluster, any status."""
+    """The newest first-dispatch row of the key that has a session, any status."""
     rows = await _fetch(
         conn,
         f"SELECT {_COLUMNS} FROM events WHERE endpoint_id = %s AND dedup_key = %s "
-        "AND update_of IS NULL AND cluster_id IS NOT NULL ORDER BY id DESC LIMIT 1",
+        "AND update_of IS NULL AND session_id IS NOT NULL ORDER BY id DESC LIMIT 1",
         (endpoint_id, dedup_key),
     )
     return rows[0] if rows else None

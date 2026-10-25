@@ -13,6 +13,8 @@ from agents_webhook.settings import LocalSettings, WebhookSettings
 from agents_webhook.worker import REUSE_FALLBACK
 
 README = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+# The retired unit word (design D2), split so the nomenclature guard does not flag it.
+RETIRED_UNIT = "clu" + "ster"
 
 STATUSES = ("new", "in-progress", "handled", "ignored", "failed")
 REASONS = (
@@ -28,7 +30,7 @@ REASONS = (
     "queue_full",
     "endpoint_removed",
     "preset_not_found",
-    "cluster_not_found",
+    "session_not_found",
     "template_error",
     "timeout",
     "turn_failed",
@@ -98,3 +100,8 @@ def test_filters_section_lists_every_field(endpoint_type, field):
 def test_retired_author_allowlist_not_documented():
     assert "WEBHOOK_ALLOWED_AUTHORS" not in README
     assert "author_not_allowed" not in README
+
+
+def test_readme_says_session_for_the_unit():
+    """The orchestrator's unit is a session; `in-cluster` (Kubernetes) is the only exception."""
+    assert re.findall(rf"\w*{RETIRED_UNIT}s?\b", README.replace("in-cluster", "")) == []

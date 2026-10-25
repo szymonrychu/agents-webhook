@@ -2,6 +2,7 @@
 
 Lessons that outlive a session. Newest first.
 
+- 2026-10-25: the orchestrator's unit is a session and the project is agents-orchestrator (design D1, D2). Run columns are `session_id`/`session_slug` (migration 0005 renames them in place, rows kept), the worker runs on agents-common v0.3.0 sessions, and no alias keeps the old names. `tests/test_nomenclature.py` guards every tracked file except dated history and the applied migrations 0001 and 0005. Why: one vocabulary across services, and no backward compatibility.
 - 2026-10-25: events about the same item are deduplicated per endpoint by `dedup_key` (repo, kind, number; Grafana: alert group digest). A queued `new` row is replaced by the newest delivery (latest wins) and the older delivery is recorded `ignored/duplicate`; the same delivery id again is `duplicate` too (D5). Why: bursts of edits should start one run with the latest data.
 - 2026-10-25: agent reuse is opt-in per preset (`reuse_running_agent`, D16). A queued event of an item with an earlier run is posted as an update to that run's running cluster, bypassing the caps; a gone or refusing cluster falls back once to a new cluster, recorded as `reuse_fallback`. Why: reuse changes what an agent sees, so the operator chooses it per preset; default off keeps one cluster per event.
 - 2026-10-25: limits are settings with defaults 3 in progress overall, 1 per endpoint, queue cap 500, body cap 5 MiB (D6), set from chart `limits.*`. Over-cap bodies get 413 after authentication; a full queue records `ignored/queue_full` rather than refusing the sender.

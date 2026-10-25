@@ -89,8 +89,8 @@ class EventView(BaseModel):
     dedup_key: str
     deliveries: int
     preset_id: str | None
-    cluster_id: str | None
-    cluster_slug: str | None
+    session_id: str | None
+    session_slug: str | None
     message_id: str | None
     update_of: int | None
     duplicate_of: int | None
