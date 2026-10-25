@@ -445,7 +445,8 @@ async def test_failed_template_error(conn, fake, make_endpoint, make_worker):
 async def test_failed_orchestrator_down_leaves_rows_then_recovers(
     conn, fake, switch, make_endpoint, make_worker, caplog
 ):
-    id = await rec(conn, await make_endpoint())
+    ep = await make_endpoint()
+    id = await rec(conn, ep)
     w = make_worker()
     switch.down = True
     caplog.set_level(logging.WARNING, logger="agents_webhook.worker")
@@ -453,10 +454,11 @@ async def test_failed_orchestrator_down_leaves_rows_then_recovers(
     await w.tick()
     await w.tick()
 
+    # The endpoint's preset cannot be read: its rows are not claimed this tick.
     r = await row(conn, id)
-    assert (r.status, r.reason, r.cluster_id, r.message_id) == ("in-progress", None, None, None)
+    assert (r.status, r.reason, r.cluster_id, r.message_id) == ("new", None, None, None)
     assert fake.clusters == {}
-    unavailable = [m for m in caplog.messages if "unavailable" in m and f"event {id}" in m]
+    unavailable = [m for m in caplog.messages if "unavailable" in m and f"endpoint {ep.id}" in m]
     assert len(unavailable) == 1
 
     switch.down = False
@@ -473,6 +475,23 @@ async def test_failed_orchestrator_down_leaves_rows_then_recovers(
     await w.tick()
     assert (await row(conn, id)).status == "handled"
     assert len(fake.clusters) == 1 and len(fake.messages) == 1
+
+
+async def test_failed_create_unavailable_leaves_the_row_in_progress(
+    conn, fake, make_endpoint, make_worker
+):
+    id = await rec(conn, await make_endpoint())
+    w = make_worker()
+    fake.fail_next("create_cluster", 503)
+
+    await w.tick()
+    r = await row(conn, id)
+    assert (r.status, r.reason, r.cluster_id, r.message_id) == ("in-progress", None, None, None)
+    assert fake.clusters == {}
+
+    await w.tick()
+    r = await row(conn, id)
+    assert r.cluster_id == cluster_of(fake, f"wh-{id}")["id"] and r.message_id is not None
 
 
 # --- route hook -----------------------------------------------------------------------------

@@ -3,14 +3,23 @@
 One worker holds the `agents-webhook-worker` advisory lock and ticks every `poll_seconds`, or
 sooner on NOTIFY `webhook_events`. A tick:
 
-1. resumes every in-progress row without a message (crash recovery; `runs.dispatch` creates no
-   second cluster and posts no second prompt);
-2. tracks every in-progress row with a message (`runs.track`: turn completed -> handled,
-   message or turn failed, or older than `run_timeout_seconds` -> failed), which frees the slots
-   the claims below use;
-3. claims `new` rows within the caps until none is claimable; each goes through the `route`
-   hook first (filled by agent reuse) and, when it answers False, is dispatched as a new
-   cluster `wh-<id>`.
+1. reads the preset of every endpoint with `new` rows, once per endpoint (D17); the rows of an
+   endpoint whose preset the orchestrator could not serve are not claimed this tick;
+2. resumes every in-progress row without a message (crash recovery; `runs.dispatch` creates no
+   second cluster and posts no second prompt, `runs.deliver` posts no second update);
+3. tracks every in-progress row with a message (`runs.track`: turn completed -> handled,
+   message or turn failed, or older than `run_timeout_seconds` -> failed; an update row through
+   `runs.track_delivery`), which frees the slots the claims below use;
+4. claims `new` rows within the caps until none is claimable; each goes through `route` first
+   and, when it answers False, is dispatched as a new cluster `wh-<id>`.
+
+Agent reuse (design D16, D17): when the endpoint's preset has `reuse_running_agent`, a claimed
+row whose key has an earlier run is marked an update of that run and, while its cluster is
+running (exists, desired `active`, first turn completed or not), delivered there as an update
+message; it bypasses the caps and is handled once the message is `sent`. A cluster that is gone
+at check time, refuses the post, or cancels or fails the message before `sent` makes the row
+fall back once: a first dispatch as `wh-<id>` when the caps allow, else back to `new` keeping
+its FIFO place. A fallback row that then fails records `reuse_fallback` in its reason.
 
 An unavailable orchestrator leaves the row as it is for the next tick (logged once per row per
 minute); a 4xx on create or post fails the row with the error code. The service never deletes
@@ -22,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import time
 from collections.abc import Callable
@@ -29,7 +39,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from agents_common import runs
-from agents_common.db import listen
+from agents_common.db import listen, transition
 from agents_common.orchestrator import (
     NotFound,
     OrchestratorClient,
@@ -51,19 +61,38 @@ LOCK_NAME = "agents-webhook-worker"
 CHANNEL = "webhook_events"
 RUN_KIND = "webhook:event"
 UNAVAILABLE_LOG_SECONDS = 60.0
+REUSE_FALLBACK = "reuse_fallback"
 
 
 def run_ref(event: events.Event) -> runs.RunRef:
-    """The run columns of an in-progress first-dispatch row."""
+    """The run columns of an in-progress row (`slug` is the recorded cluster's, else its own)."""
     assert event.started_at is not None
     return runs.RunRef(
         id=event.id,
-        slug=f"wh-{event.id}",
+        slug=event.cluster_slug or f"wh-{event.id}",
         preset_id=event.preset_id or "",
         cluster_id=event.cluster_id,
         message_id=event.message_id,
         started_at=event.started_at,
     )
+
+
+class _FallbackStore:
+    """The run store of a reuse-fallback row: a failure reason is prefixed `reuse_fallback`."""
+
+    def __init__(self, store: events.EventStore) -> None:
+        self._store = store
+
+    async def set_cluster(self, run_id: runs.RunId, cluster_id: str) -> None:
+        await self._store.set_cluster(run_id, cluster_id)
+
+    async def set_message(self, run_id: runs.RunId, message_id: str) -> None:
+        await self._store.set_message(run_id, message_id)
+
+    async def finish(self, run_id: runs.RunId, status: runs.RunStatus, reason: str | None) -> bool:
+        if status == "failed":
+            reason = f"{REUSE_FALLBACK}: {reason}" if reason else REUSE_FALLBACK
+        return await self._store.finish(run_id, status, reason)
 
 
 class Worker:
@@ -81,75 +110,246 @@ class Worker:
         self.pool = pool
         self.client = client
         self.store = events.EventStore(pool)
+        self._fallback_store = _FallbackStore(self.store)
         self._clock = clock
-        self._unavailable_logged: dict[int, float] = {}
+        self._unavailable_logged: dict[tuple[str, int], float] = {}
+        # Per tick: endpoints whose preset opts in to reuse, and endpoints whose preset could
+        # not be read (their claimed rows are held and released at the end of the tick).
+        self._reuse: set[int] = set()
+        self._skip: set[int] = set()
 
     async def tick(self) -> None:
+        await self._read_presets()
         rows = await self._in_progress()
         for row in rows:
             if row.message_id is None:
-                await self.dispatch(row)
+                await self._resume(row)
         for row in rows:
             if row.message_id is not None:
                 await self._track(row)
+        held: list[int] = []
         while (claimed := await self._claim()) is not None:
-            if not await self.route(claimed):
+            if claimed.event.endpoint_id in self._skip:
+                held.append(claimed.event.id)
+            elif not await self.route(claimed):
                 await self.dispatch(claimed.event)
+        for id in held:
+            async with self.pool.connection() as conn:
+                await events.release(conn, id)
 
     async def route(self, claimed: events.Claimed) -> bool:
-        """Hook per claimed row: True when the row was routed (to a running agent) and needs
-        no first dispatch. First dispatch is the default."""
-        return False
+        """True when the row was routed (delivered to a running agent, fallen back, or left
+        for the next tick) and needs no first dispatch; False: first dispatch."""
+        event, prior = claimed.event, claimed.prior
+        if event.reason == REUSE_FALLBACK:  # fell back once already: never reused again
+            return not await self._room_or_release(event)
+        if prior is None or event.endpoint_id not in self._reuse:
+            return False
+        async with self.pool.connection() as conn:
+            await events.mark_update(conn, event.id, prior.id)
+        await self._deliver(dataclasses.replace(event, update_of=prior.id), prior)
+        return True
 
     async def dispatch(self, event: events.Event) -> None:
         """Create the row's cluster and post its rendered prompt, each at most once."""
+        store = self._store_of(event)
         if not event.preset_id:
-            await self.store.finish(event.id, "failed", "preset_not_found")
+            await store.finish(event.id, "failed", "preset_not_found")
             return
-        try:
-            text = await prompt.render_async(
-                events.to_normalized(event),
-                event.prompt_template,
-                payload=event.payload if isinstance(event.payload, dict) else None,
-                timeout=self.settings.template_timeout_seconds,
-            )
-        except prompt.TemplateError as exc:
-            log.warning("event %s: template error: %s", event.id, exc)
-            await self.store.finish(event.id, "failed", "template_error")
+        text = await self._render(event, store)
+        if text is None:
             return
         try:
             await runs.dispatch(
-                self.client, self.store, run_ref(event), text, runs.marker(RUN_KIND, event.id)
+                self.client, store, run_ref(event), text, runs.marker(RUN_KIND, event.id)
             )
         except OrchestratorUnavailable as exc:
-            self._unavailable(event.id, exc)
+            self._unavailable(("event", event.id), exc)
         except NotFound as exc:  # dispatch already failed the row
             log.warning("event %s: failed: %s", event.id, exc)
         except OrchestratorError as exc:
             if not 400 <= exc.status < 500:
                 raise
             log.warning("event %s: failed: %s", event.id, exc)
-            await self.store.finish(event.id, "failed", exc.code)
+            await store.finish(event.id, "failed", exc.code)
         else:
-            self._unavailable_logged.pop(event.id, None)
+            self._unavailable_logged.pop(("event", event.id), None)
+
+    # --- reuse ------------------------------------------------------------------------------
+
+    async def _deliver(self, event: events.Event, parent: events.Event) -> None:
+        """Deliver update row `event` to `parent`'s cluster while it runs, else fall back."""
+        assert parent.cluster_id is not None
+        try:
+            if await runs.running_cluster(self.client, parent.cluster_id) is None:
+                log.info("event %s: cluster of event %s is not running", event.id, parent.id)
+                await self._fallback(event)
+                return
+            if event.cluster_id is None:
+                await self.store.set_cluster(event.id, parent.cluster_id, slug=parent.cluster_slug)
+                event = dataclasses.replace(
+                    event, cluster_id=parent.cluster_id, cluster_slug=parent.cluster_slug
+                )
+            text = await self._render(event, self.store, update=True)
+            if text is None:
+                return
+            delivered = await runs.deliver(
+                self.client,
+                self.store,
+                run_ref(event),
+                parent.cluster_id,
+                text,
+                runs.marker(RUN_KIND, event.id),
+            )
+        except OrchestratorUnavailable as exc:
+            self._unavailable(("event", event.id), exc)
+            return
+        except OrchestratorError as exc:
+            log.warning("event %s: delivery error, retrying: %s", event.id, exc)
+            return
+        self._unavailable_logged.pop(("event", event.id), None)
+        if delivered is None:
+            log.info("event %s: cluster of event %s refused the update", event.id, parent.id)
+            await self._fallback(event)
+
+    async def _track_delivery(self, event: events.Event) -> None:
+        try:
+            outcome = await runs.track_delivery(
+                self.client,
+                self.store,
+                run_ref(event),
+                timeout_seconds=self.settings.run_timeout_seconds,
+            )
+        except OrchestratorUnavailable as exc:
+            self._unavailable(("event", event.id), exc)
+            return
+        except OrchestratorError as exc:
+            log.warning("event %s: tracking error, retrying: %s", event.id, exc)
+            return
+        self._unavailable_logged.pop(("event", event.id), None)
+        if outcome == "gone":
+            log.info("event %s: update message cancelled or failed before sent", event.id)
+            await self._fallback(event)
+        elif outcome is not None:
+            log.info("event %s: %s (update of %s)", event.id, outcome, event.update_of)
+
+    async def _fallback(self, event: events.Event) -> None:
+        """Make the update row a first-dispatch row (once): dispatch it when the caps allow,
+        else return it to `new` keeping its FIFO place."""
+        async with self.pool.connection() as conn:
+            if event.reason != REUSE_FALLBACK:
+                await transition(
+                    conn, "events", event.id, "in-progress", "in-progress", reason=REUSE_FALLBACK
+                )
+            await events.clear_update(conn, event.id)
+            fresh = await events.get_event(conn, event.id)
+        if fresh is None or fresh.status != "in-progress":
+            return
+        if await self._room_or_release(fresh):
+            await self.dispatch(fresh)
+
+    async def _room_or_release(self, event: events.Event) -> bool:
+        """True when a first dispatch of `event` fits the caps; else release it to `new`, and
+        stop claiming its endpoint past the caps for the rest of the tick."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT count(*), count(*) FILTER (WHERE endpoint_id = %s) FROM events "
+                "WHERE status = 'in-progress' AND update_of IS NULL AND id <> %s",
+                (event.endpoint_id, event.id),
+            )
+            total, per = await cur.fetchone() or (0, 0)
+            if (
+                total < self.settings.max_in_progress
+                and per < self.settings.max_in_progress_per_endpoint
+            ):
+                return True
+            await events.release(conn, event.id)
+        log.info("event %s: caps full, back to new", event.id)
+        if event.endpoint_id is not None:
+            self._reuse.discard(event.endpoint_id)
+        return False
+
+    async def _read_presets(self) -> None:
+        """Read each preset of the endpoints with `new` rows once: which opt in to reuse, and
+        which could not be read (orchestrator unavailable)."""
+        self._reuse, self._skip = set(), set()
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT DISTINCT ep.id, ep.preset_id FROM events e "
+                "JOIN endpoints ep ON ep.id = e.endpoint_id WHERE e.status = 'new'"
+            )
+            pending = await cur.fetchall()
+        for endpoint_id, preset_id in pending:
+            try:
+                preset = await self.client.get_preset(preset_id)
+            except OrchestratorUnavailable as exc:
+                self._unavailable(("endpoint", endpoint_id), exc)
+                self._skip.add(endpoint_id)
+                continue
+            except OrchestratorError as exc:  # missing preset: reuse off
+                log.info("endpoint %s: preset %s: %s", endpoint_id, preset_id, exc)
+                continue
+            self._unavailable_logged.pop(("endpoint", endpoint_id), None)
+            if preset.reuse_running_agent:
+                self._reuse.add(endpoint_id)
+
+    # --- shared -----------------------------------------------------------------------------
+
+    async def _resume(self, event: events.Event) -> None:
+        """Continue an in-progress row that has no message yet (crash or unavailability)."""
+        if event.update_of is None:
+            await self.dispatch(event)
+            return
+        if event.reason == REUSE_FALLBACK:  # crashed between marking and clearing
+            await self._fallback(event)
+            return
+        async with self.pool.connection() as conn:
+            parent = await events.get_event(conn, event.update_of)
+        if parent is None or parent.cluster_id is None:
+            await self._fallback(event)
+            return
+        await self._deliver(event, parent)
+
+    async def _render(
+        self, event: events.Event, store: runs.RunStore, *, update: bool = False
+    ) -> str | None:
+        """The row's prompt; None after failing the row on a template error."""
+        try:
+            return await prompt.render_async(
+                events.to_normalized(event),
+                event.prompt_template,
+                update=update,
+                payload=event.payload if isinstance(event.payload, dict) else None,
+                timeout=self.settings.template_timeout_seconds,
+            )
+        except prompt.TemplateError as exc:
+            log.warning("event %s: template error: %s", event.id, exc)
+            await store.finish(event.id, "failed", "template_error")
+            return None
+
+    def _store_of(self, event: events.Event) -> runs.RunStore:
+        return self._fallback_store if event.reason == REUSE_FALLBACK else self.store
 
     async def _track(self, event: events.Event) -> None:
+        if event.update_of is not None:
+            await self._track_delivery(event)
+            return
         try:
             status = await runs.track(
                 self.client,
-                self.store,
+                self._store_of(event),
                 run_ref(event),
                 datetime.now(UTC),
                 timeout_seconds=self.settings.run_timeout_seconds,
             )
         except OrchestratorUnavailable as exc:
-            self._unavailable(event.id, exc)
+            self._unavailable(("event", event.id), exc)
             return
         except OrchestratorError as exc:
             log.warning("event %s: tracking error, retrying: %s", event.id, exc)
             return
         if status is not None:
-            self._unavailable_logged.pop(event.id, None)
+            self._unavailable_logged.pop(("event", event.id), None)
             log.info("event %s: %s", event.id, status)
 
     async def _in_progress(self) -> list[events.Event]:
@@ -162,15 +362,15 @@ class Worker:
                 conn,
                 max_in_progress=self.settings.max_in_progress,
                 max_per_endpoint=self.settings.max_in_progress_per_endpoint,
-                reuse_endpoints=set(),
+                reuse_endpoints=self._reuse,
             )
 
-    def _unavailable(self, event_id: int, exc: Exception) -> None:
+    def _unavailable(self, key: tuple[str, int], exc: Exception) -> None:
         now = self._clock()
-        last = self._unavailable_logged.get(event_id)
+        last = self._unavailable_logged.get(key)
         if last is None or now - last >= UNAVAILABLE_LOG_SECONDS:
-            self._unavailable_logged[event_id] = now
-            log.warning("event %s: orchestrator unavailable, retrying: %s", event_id, exc)
+            self._unavailable_logged[key] = now
+            log.warning("%s %s: orchestrator unavailable, retrying: %s", *key, exc)
 
 
 async def _wake_on_notify(url: str, wake: asyncio.Event) -> None:
