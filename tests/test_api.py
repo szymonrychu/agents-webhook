@@ -14,6 +14,7 @@ from agents_common.db import open_pool
 from agents_common.fake_orchestrator import FakeOrchestrator
 from agents_common.orchestrator import OrchestratorClient
 
+from agents_webhook import filters as filter_engine
 from agents_webhook.api.app import create_api_app
 from agents_webhook.db import endpoints, events
 from agents_webhook.db.endpoints import EndpointIn
@@ -381,6 +382,138 @@ async def test_events_unknown_404(api):
     assert resp.status_code == 404 and code(resp) == "not_found"
 
 
+# --- endpoint filters ---------------------------------------------------------------------
+
+DENY_ALICE = {"deny": [{"field": "author", "values": ["alice"]}]}
+CANONICAL_DENY_ALICE = {
+    "allow": [],
+    "deny": [{"field": "author", "match": "equals", "values": ["alice"]}],
+}
+
+
+async def test_create_endpoint_with_filters(api, preset):
+    resp = await create(api, preset, filters=DENY_ALICE)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["filters"] == CANONICAL_DENY_ALICE
+    listed = (await api.get(f"{P}/endpoints")).json()
+    assert listed[0]["filters"] == CANONICAL_DENY_ALICE
+    plain = await create(api, preset)
+    assert plain.json()["filters"] == {"allow": [], "deny": []}
+    listed = (await api.get(f"{P}/endpoints")).json()
+    assert listed[1]["filters"] == {"allow": [], "deny": []}
+
+
+async def test_create_endpoint_invalid_filters_422(api, preset, conn):
+    resp = await create(api, preset, filters={"deny": [{"field": "nosuchfield", "values": ["x"]}]})
+    assert resp.status_code == 422
+    assert code(resp) == "invalid_request"
+    assert "filters.deny[0]" in resp.json()["error"]["message"]
+    cur = await conn.execute("SELECT count(*) FROM endpoints")
+    assert await cur.fetchone() == (0,)
+
+
+async def test_put_filters_replaces(api, preset, caplog):
+    created = (await create(api, preset, filters=DENY_ALICE)).json()
+    new = {"allow": [{"field": "repo", "match": "regex", "values": ["^o/"]}]}
+    with caplog.at_level("INFO"):
+        resp = await api.put(f"{P}/endpoints/{created['id']}/filters", json=new)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == created["id"]
+    assert body["filters"] == {
+        "allow": [{"field": "repo", "match": "regex", "values": ["^o/"]}],
+        "deny": [],
+    }
+    assert "password" not in body
+    assert f"api: endpoint filters replaced id={created['id']}" in caplog.text
+    assert "^o/" not in caplog.text
+    listed = (await api.get(f"{P}/endpoints")).json()
+    assert listed[0]["filters"] == body["filters"]
+
+
+async def test_put_filters_errors(api, preset):
+    missing = await api.put(f"{P}/endpoints/999/filters", json=DENY_ALICE)
+    assert missing.status_code == 404
+    assert code(missing) == "not_found"
+    created = (
+        await api.post(f"{P}/endpoints", json={"type": "grafana-alert", "preset_id": preset})
+    ).json()
+    bad = await api.put(
+        f"{P}/endpoints/{created['id']}/filters",
+        json={"deny": [{"field": "author", "values": ["alice"]}]},
+    )
+    assert bad.status_code == 422
+    assert code(bad) == "invalid_request"
+    assert "filters.deny[0]" in bad.json()["error"]["message"]
+
+
+async def test_preview_reports_filters(api, conn):
+    example = p.gh_pull_request()
+
+    async def preview(filters):
+        return await api.post(
+            f"{P}/templates/preview",
+            json={"type": "github-pr", "example": example, "filters": filters},
+        )
+
+    passed = await preview({"deny": [{"field": "author", "values": ["bob"]}]})
+    assert passed.status_code == 200, passed.text
+    assert passed.json() == {"prompt": None, "filters": {"passed": True, "reason": None}}
+    denied = await preview(DENY_ALICE)
+    assert denied.json() == {
+        "prompt": None,
+        "filters": {"passed": False, "reason": "filter_denied: author"},
+    }
+    invalid = await preview({"deny": [{"field": "nosuchfield", "values": ["x"]}]})
+    assert invalid.status_code == 422
+    assert "filters.deny[0]" in invalid.json()["error"]["message"]
+    both = await api.post(
+        f"{P}/templates/preview",
+        json={
+            "type": "github-pr",
+            "example": example,
+            "filters": DENY_ALICE,
+            "template": "{{ title }}",
+        },
+    )
+    assert both.json()["prompt"] == "Fix it"
+    assert both.json()["filters"]["passed"] is False
+    cur = await conn.execute(
+        "SELECT (SELECT count(*) FROM endpoints), (SELECT count(*) FROM events)"
+    )
+    assert await cur.fetchone() == (0, 0)
+
+
+async def test_preview_filters_mirror_ingest_builtin_and_error(api, monkeypatch):
+    body = {
+        "type": "github-pr",
+        "example": p.gh_pull_request(draft=True),
+        "filters": {"deny": [{"field": "author", "values": ["nobody"]}]},
+    }
+    resp = await api.post(f"{P}/templates/preview", json=body)
+    assert resp.json()["filters"] == {"passed": False, "reason": "action_ignored"}
+
+    body["example"] = p.gh_pull_request()
+    monkeypatch.setattr(filter_engine, "evaluate", lambda *a, **k: 1 / 0)
+    resp = await api.post(f"{P}/templates/preview", json=body)
+    assert resp.status_code == 200
+    assert resp.json()["filters"] == {"passed": False, "reason": "filter_error"}
+
+
+async def test_preview_requires_template_or_filters(api):
+    resp = await api.post(
+        f"{P}/templates/preview", json={"type": "github-pr", "example": p.gh_pull_request()}
+    )
+    assert resp.status_code == 422
+    assert code(resp) == "invalid_request"
+    assert resp.json()["error"]["message"] == "template or filters: required"
+
+
+async def test_meta_reports_filter_fields(api):
+    body = (await api.get(f"{P}/meta")).json()
+    assert body["filter_fields"] == {k: list(v) for k, v in filter_engine.FIELDS.items()}
+
+
 # --- templates preview ----------------------------------------------------------------------
 
 
@@ -394,7 +527,7 @@ async def test_preview_renders_normalized_example_without_storing(api, conn):
         },
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"prompt": "PR 7 Fix it by alice"}
+    assert resp.json() == {"prompt": "PR 7 Fix it by alice", "filters": None}
     cur = await conn.execute(
         "SELECT (SELECT count(*) FROM endpoints), (SELECT count(*) FROM events)"
     )
@@ -413,7 +546,7 @@ async def test_preview_from_json_filter_parses_example_text(api):
         },
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"prompt": "v opened"}
+    assert resp.json() == {"prompt": "v opened", "filters": None}
 
 
 @pytest.mark.parametrize(

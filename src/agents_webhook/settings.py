@@ -14,7 +14,6 @@ class WebhookSettings(BaseServiceSettings):
 
     public_base_url: str = "https://lab.szymonrichert.pl"
     bot_logins: CsvList = []
-    allowed_authors: CsvList = []
     max_in_progress: int = Field(3, ge=1)
     max_in_progress_per_endpoint: int = Field(1, ge=1)
     max_queue: int = Field(500, ge=1)

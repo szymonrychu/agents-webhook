@@ -5,7 +5,7 @@ import secrets
 import psycopg
 import pytest
 
-from agents_webhook import credentials
+from agents_webhook import credentials, filters
 from agents_webhook.db import endpoints
 from agents_webhook.db.endpoints import Credentials, EndpointIn, SuffixTaken
 
@@ -416,3 +416,92 @@ async def test_delete_keeps_events_with_suffix(conn, endpoint):
         "SELECT endpoint_id, endpoint_suffix FROM events WHERE id = %s", (event_id,)
     )
     assert await cur.fetchone() == (None, "hook")
+
+
+# --- filters --------------------------------------------------------------------------------
+
+RULES = {"deny": [{"field": "author", "match": "equals", "values": ["bot"]}]}
+
+
+async def _count(conn) -> int:
+    cur = await conn.execute("SELECT count(*) FROM endpoints")
+    return (await cur.fetchone())[0]
+
+
+async def test_filters_default_empty(conn):
+    cur = await conn.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'endpoints' AND column_name = 'filters'"
+    )
+    assert await cur.fetchone() is not None
+    ep, _ = await endpoints.create(
+        conn, EndpointIn(type="github-pr", preset_id="p"), min_password_length=MIN
+    )
+    assert ep.filters == {"allow": [], "deny": []}
+    assert (await endpoints.get(conn, ep.id)).filters == {"allow": [], "deny": []}
+
+
+async def test_create_stores_filters(conn):
+    expected = filters.validate("github-pr", RULES)
+    assert expected["deny"]
+    ep, creds = await endpoints.create(
+        conn,
+        EndpointIn(type="github-pr", preset_id="p", filters=RULES),
+        min_password_length=MIN,
+    )
+    assert ep.filters == expected
+    assert (await endpoints.get(conn, ep.id)).filters == expected
+    assert (await endpoints.get_by_suffix(conn, ep.suffix)).filters == expected
+    assert (await endpoints.list_all(conn))[0].filters == expected
+    authed = await endpoints.authenticate(conn, ep.suffix, basic(creds.username, creds.password))
+    assert authed is not None and authed.filters == expected
+
+
+async def test_create_invalid_filters_inserts_nothing(conn):
+    with pytest.raises(ValueError, match=r"^filters"):
+        await endpoints.create(
+            conn,
+            EndpointIn(type="github-pr", preset_id="p", filters={"bogus": []}),
+            min_password_length=MIN,
+        )
+    assert await _count(conn) == 0
+
+
+async def test_set_filters_replaces(conn):
+    ep, _ = await endpoints.create(
+        conn, EndpointIn(type="github-pr", preset_id="p"), min_password_length=MIN
+    )
+    updated = await endpoints.set_filters(conn, ep.id, RULES)
+    assert updated is not None
+    assert updated.filters == filters.validate("github-pr", RULES)
+    assert updated.suffix == ep.suffix
+    assert (await endpoints.get(conn, ep.id)) == updated
+    cleared = await endpoints.set_filters(conn, ep.id, {})
+    assert cleared is not None and cleared.filters == filters.EMPTY
+    assert await endpoints.set_filters(conn, ep.id + 1000, RULES) is None
+
+
+async def test_set_filters_validates_against_type(conn):
+    ep, _ = await endpoints.create(
+        conn, EndpointIn(type="github-pr", preset_id="p", filters=RULES), min_password_length=MIN
+    )
+    before = await endpoints.get(conn, ep.id)
+    bad = {"allow": [{"field": "alertname", "match": "equals", "values": ["x"]}]}
+    with pytest.raises(ValueError, match=r"^filters"):
+        await endpoints.set_filters(conn, ep.id, bad)
+    assert await endpoints.get(conn, ep.id) == before
+
+
+async def test_authenticate_failures_unchanged_with_filters(conn, verify_spy):
+    ep, creds = await endpoints.create(
+        conn,
+        EndpointIn(type="github-pr", preset_id="p", filters=RULES),
+        min_password_length=MIN,
+    )
+    assert (
+        await endpoints.authenticate(conn, "unknown", basic(creds.username, creds.password)) is None
+    )
+    assert await endpoints.authenticate(conn, ep.suffix, basic(creds.username, "wrong" * 5)) is None
+    assert await endpoints.authenticate(conn, ep.suffix, basic("nobody", creds.password)) is None
+    assert await endpoints.authenticate(conn, ep.suffix, None) is None
+    assert len(verify_spy) == 4

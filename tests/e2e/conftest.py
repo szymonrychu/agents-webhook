@@ -118,7 +118,6 @@ class Stack:
             "WEBHOOK_POLL_SECONDS": "0.2",
             "WEBHOOK_SHUTDOWN_GRACE_SECONDS": "5",
             "WEBHOOK_BOT_LOGINS": "botty",
-            "WEBHOOK_ALLOWED_AUTHORS": "alice,bob",
             "WEBHOOK_MAX_IN_PROGRESS": "20",
             "WEBHOOK_MAX_IN_PROGRESS_PER_ENDPOINT": "20",
             "WEBHOOK_AUTH_FAILURES_PER_MINUTE": "1000",

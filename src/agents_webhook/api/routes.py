@@ -12,10 +12,11 @@ from agents_common.orchestrator import (
 from fastapi import APIRouter, Query, Response
 from psycopg_pool import AsyncConnectionPool
 
-from agents_webhook import prompt
+from agents_webhook import filters, prompt
 from agents_webhook.api import schemas
 from agents_webhook.db import endpoints, events
 from agents_webhook.db.endpoints import Endpoint, SuffixTaken
+from agents_webhook.ingest.app import verdict
 from agents_webhook.normalize import TypeMismatch, Unsupported, normalize
 from agents_webhook.settings import WebhookSettings
 
@@ -102,6 +103,18 @@ def build_router(
         log.info("api: endpoint created id=%s type=%s", endpoint.id, endpoint.type)
         return {**view(endpoint), "password": creds.password}
 
+    @router.put("/endpoints/{id}/filters", response_model=schemas.EndpointView)
+    async def put_filters(id: int, body: schemas.Filters) -> dict[str, Any]:
+        try:
+            async with pool.connection() as conn:
+                endpoint = await endpoints.set_filters(conn, id, body.model_dump())
+        except ValueError as exc:
+            raise _invalid(str(exc)) from exc
+        if endpoint is None:
+            raise ApiError(404, "not_found", "endpoint not found")
+        log.info("api: endpoint filters replaced id=%s", id)
+        return view(endpoint)
+
     @router.post("/endpoints/{id}/rotate", response_model=schemas.EndpointCreated)
     async def rotate_endpoint(
         id: int, response: Response, body: schemas.RotateIn | None = None
@@ -155,26 +168,38 @@ def build_router(
         return event
 
     @router.post("/templates/preview", response_model=schemas.PreviewOut)
-    async def preview_template(body: schemas.PreviewIn) -> dict[str, str]:
-        """Render a template against an example payload; nothing is stored."""
+    async def preview_template(body: schemas.PreviewIn) -> dict[str, Any]:
+        """Render a template and/or evaluate filters against an example; nothing is stored."""
+        if body.template is None and body.filters is None:
+            raise _invalid("template or filters: required")
         if body.type not in endpoints.TYPES:
             raise _invalid(f"type: must be one of {', '.join(endpoints.TYPES)}")
         try:
             event = normalize(body.type, _PREVIEW_HEADERS[body.type], body.example)
         except (TypeMismatch, Unsupported) as exc:
             raise _invalid(f"example: not a {body.type} payload ({exc})") from exc
-        payload = body.example if isinstance(body.example, dict) else None
-        try:
-            text = await prompt.preview_async(
-                body.template,
-                payload,
-                event,
-                timeout=settings.template_timeout_seconds,
-                memory_mb=settings.template_memory_mb,
-            )
-        except (ValueError, prompt.TemplateError) as exc:
-            raise _invalid(f"template: {exc}") from exc
-        return {"prompt": text}
+        result = None
+        if body.filters is not None:
+            try:
+                canonical = filters.validate(body.type, body.filters.model_dump())
+            except ValueError as exc:
+                raise _invalid(str(exc)) from exc
+            reason = verdict(event, canonical, settings, "source=preview")
+            result = {"passed": reason is None, "reason": reason}
+        text = None
+        if body.template is not None:
+            payload = body.example if isinstance(body.example, dict) else None
+            try:
+                text = await prompt.preview_async(
+                    body.template,
+                    payload,
+                    event,
+                    timeout=settings.template_timeout_seconds,
+                    memory_mb=settings.template_memory_mb,
+                )
+            except (ValueError, prompt.TemplateError) as exc:
+                raise _invalid(f"template: {exc}") from exc
+        return {"prompt": text, "filters": result}
 
     @router.get("/meta", response_model=schemas.Meta)
     async def meta() -> dict[str, Any]:
@@ -182,6 +207,7 @@ def build_router(
             "public_base_url": settings.public_base_url,
             "ingest_path_prefix": INGEST_PREFIX,
             "types": list(endpoints.TYPES),
+            "filter_fields": {name: list(fields) for name, fields in filters.FIELDS.items()},
             "limits": {name: getattr(settings, name) for name in schemas.Limits.model_fields},
         }
 

@@ -2,7 +2,9 @@
 
 An endpoint has exactly one type; `normalize` parses a payload for that type, raises
 `TypeMismatch` when the payload is a valid provider event of another type and `Unsupported`
-when it is no supported event at all. `classify` returns the ignore reason or None.
+when it is no supported event at all. `classify` returns the built-in ignore reason or None:
+`self_event` for an actor in `WEBHOOK_BOT_LOGINS`, then `resolved` and `action_ignored`. An
+author allowlist is an endpoint filter (`allow` rule on `author`), not a rule here.
 """
 
 import hashlib
@@ -50,6 +52,8 @@ class NormalizedEvent:
     priority: int
     draft: bool = False
     changed: tuple[str, ...] = ()
+    source_branch: str | None = None
+    target_branch: str | None = None
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:
@@ -62,6 +66,18 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
 
 def _login(user: Any) -> str | None:
     return user.get("login") if isinstance(user, dict) else None
+
+
+def _ref(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _ref_of(parent: Any, key: str) -> str | None:
+    return (
+        _ref(parent.get(key, {}).get("ref"))
+        if isinstance(parent, dict) and isinstance(parent.get(key), dict)
+        else None
+    )
 
 
 def _event(
@@ -135,6 +151,8 @@ def _github(
         delivery_id=_header(headers, "X-GitHub-Delivery"),
         draft=bool(item.get("draft")),
         changed=tuple(sorted(changes)) if isinstance(changes, dict) else (),
+        source_branch=_ref_of(item, "head") if name != "issue_comment" else None,
+        target_branch=_ref_of(item, "base") if name != "issue_comment" else None,
     )
 
 
@@ -206,6 +224,8 @@ def _gitlab(
         delivery_id=_header(headers, "X-Gitlab-Event-UUID"),
         draft=bool(item.get("draft") or item.get("work_in_progress")),
         changed=changed,
+        source_branch=_ref(item.get("source_branch")) if is_mr else None,
+        target_branch=_ref(item.get("target_branch")) if is_mr else None,
     )
 
 
@@ -256,18 +276,10 @@ def normalize(endpoint_type: str, headers: Mapping[str, str], payload: Any) -> N
     return (_github if provider == "github" else _gitlab)(endpoint_type, headers, payload)
 
 
-def classify(
-    event: NormalizedEvent, *, bot_logins: Collection[str], allowed_authors: Collection[str]
-) -> str | None:
-    """The ignore reason for a normalised event, or None when it should run."""
+def classify(event: NormalizedEvent, *, bot_logins: Collection[str]) -> str | None:
+    """The built-in ignore reason for a normalised event, or None when it should run."""
     if event.actor and event.actor in bot_logins:
         return "self_event"
-    if (
-        event.kind in {"issue", "comment"}
-        and allowed_authors
-        and event.author not in allowed_authors
-    ):
-        return "author_not_allowed"
     if event.kind == "alert":
         return None if event.action == "firing" else "resolved"
     if event.action not in _HANDLED_ACTIONS[event.kind]:

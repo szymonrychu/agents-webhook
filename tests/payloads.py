@@ -23,10 +23,16 @@ def _gh_item(number: int = 7, **extra: Any) -> dict[str, Any]:
     }
 
 
+def _gh_pr_item(**extra: Any) -> dict[str, Any]:
+    return _gh_item(
+        head={"ref": "feature/x", "sha": "abc"}, base={"ref": "main", "sha": "def"}, **extra
+    )
+
+
 def gh_pull_request(action: str = "opened", draft: bool = False, **top: Any) -> dict[str, Any]:
     return {
         "action": action,
-        "pull_request": _gh_item(draft=draft),
+        "pull_request": _gh_pr_item(draft=draft),
         "repository": _gh_repo(),
         "sender": {"login": "alice"},
         **top,
@@ -70,7 +76,7 @@ def gh_review_comment(action: str = "created") -> dict[str, Any]:
             "html_url": "https://github.com/octo/repo/pull/7#r1",
             "user": {"login": "bob"},
         },
-        "pull_request": _gh_item(),
+        "pull_request": _gh_pr_item(),
         "repository": _gh_repo(),
         "sender": {"login": "bob"},
     }
@@ -84,7 +90,7 @@ def gh_review(action: str = "submitted") -> dict[str, Any]:
             "html_url": "https://github.com/octo/repo/pull/7#rv1",
             "user": {"login": "bob"},
         },
-        "pull_request": _gh_item(),
+        "pull_request": _gh_pr_item(),
         "repository": _gh_repo(),
         "sender": {"login": "bob"},
     }
@@ -107,6 +113,8 @@ def gl_merge_request(
             "description": "Adds thing",
             "action": action,
             "draft": draft,
+            "source_branch": "feature/x",
+            "target_branch": "main",
             "url": "https://gitlab.com/grp/sub/proj/-/merge_requests/12",
         },
         "labels": [{"title": "backend"}],
@@ -147,7 +155,13 @@ def gl_note(on_mr: bool, user: str = "bob") -> dict[str, Any]:
         },
     }
     if on_mr:
-        body["merge_request"] = {"iid": 12, "title": "Add thing", "description": "Adds thing"}
+        body["merge_request"] = {
+            "iid": 12,
+            "title": "Add thing",
+            "description": "Adds thing",
+            "source_branch": "feature/x",
+            "target_branch": "main",
+        }
     else:
         body["issue"] = {"iid": 5, "title": "Broken", "description": "It is broken"}
     return body

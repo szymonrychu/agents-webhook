@@ -3,8 +3,9 @@
 Per request, in order: the failed-auth limit (429, before any DB or hash work), basic auth
 against the endpoint (401, identical for every failure), the body cap (413, read only after
 auth so an anonymous caller cannot make the pod buffer a body), GitHub `ping` (202 pong),
-JSON (400), normalize and classify, record, NOTIFY, 202 `{id, status, reason}`. A DB
-failure is 503 so the forge retries; nothing else is 5xx.
+JSON (400), normalize, classify and the endpoint's filters (a built-in reason wins; a filter
+miss is stored ignored, `filter_error` when evaluation itself fails), record, NOTIFY,
+202 `{id, status, reason}`. A DB failure is 503 so the forge retries; nothing else is 5xx.
 
 Logs carry the endpoint id, event id, status, reason and client key; never the suffix of a
 failed request, the body, the Authorization header or a password.
@@ -24,6 +25,7 @@ from psycopg_pool import AsyncConnectionPool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 
+from agents_webhook import filters
 from agents_webhook.db import endpoints, events
 from agents_webhook.db.endpoints import Endpoint
 from agents_webhook.ingest.ratelimit import FailureLimiter, client_key, parse_networks
@@ -33,6 +35,7 @@ from agents_webhook.settings import WebhookSettings
 log = logging.getLogger(__name__)
 
 CHANNEL = "webhook_events"
+FILTER_ERROR = "filter_error"
 REALM = 'Basic realm="agents-webhook"'
 # Every DB failure the forge should retry: connection, pool and server errors, and a key
 # whose `new` row kept being claimed. A DataError is the request's fault (400).
@@ -79,6 +82,24 @@ def _unparsed(endpoint: Endpoint, headers: Mapping[str, str], reason: str) -> No
         dedup_key=f"{source}/{reason}",
         priority=1,
     )
+
+
+def verdict(
+    event: NormalizedEvent, rules: dict[str, Any], settings: WebhookSettings, context: str
+) -> str | None:
+    """The ignore reason for `event`, shared by ingest and the template preview.
+
+    Built-in rules first, then the endpoint's filters; an evaluation failure fails closed and
+    is logged by type with `context`.
+    """
+    reason = classify(event, bot_logins=settings.bot_logins)
+    if reason is not None:
+        return reason
+    try:
+        return filters.evaluate(event, rules)
+    except Exception as exc:
+        log.error("ingest: filter evaluation failed (%s) %s", type(exc).__name__, context)
+        return FILTER_ERROR
 
 
 class _TooLarge(Exception):
@@ -163,10 +184,8 @@ def create_ingest_app(settings: WebhookSettings, pool: AsyncConnectionPool) -> F
             return _error(400, "bad_request")
         try:
             event = normalize(endpoint.type, headers, payload)
-            reason = classify(
-                event,
-                bot_logins=settings.bot_logins,
-                allowed_authors=settings.allowed_authors,
+            reason = verdict(
+                event, endpoint.filters, settings, f"endpoint={endpoint.id} client={client}"
             )
         except TypeMismatch:
             event, reason = _unparsed(endpoint, headers, "type_mismatch"), "type_mismatch"

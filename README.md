@@ -23,7 +23,6 @@ Every setting is an environment variable. The first block is read by all subcomm
 |---|---|---|
 | `WEBHOOK_PUBLIC_BASE_URL` | `https://lab.szymonrichert.pl` | base of the printed endpoint URLs (trailing slash removed) |
 | `WEBHOOK_BOT_LOGINS` | empty | comma-separated logins whose own events are ignored (`self_event`) |
-| `WEBHOOK_ALLOWED_AUTHORS` | empty (everyone) | comma-separated authors allowed to start work from issues and comments (`author_not_allowed` otherwise) |
 | `WEBHOOK_MAX_IN_PROGRESS` | 3 | events running at once, overall |
 | `WEBHOOK_MAX_IN_PROGRESS_PER_ENDPOINT` | 1 | events running at once for one endpoint |
 | `WEBHOOK_MAX_QUEUE` | 500 | `new` events kept before further ones are ignored as `queue_full` |
@@ -68,6 +67,21 @@ Configure the sender with the endpoint URL and its credentials:
 - GitLab: Settings, Webhooks. URL `https://<username>:<password>@lab.szymonrichert.pl/webhook/<suffix>`; tick issue, merge request and comment events as the type needs. Leave the secret token empty.
 - Grafana: Alerting, Contact points, new contact point of type Webhook. URL `https://lab.szymonrichert.pl/webhook/<suffix>`, set the basic auth Username and Password fields.
 
+## Filters
+
+Each endpoint carries `filters = {"allow": [Rule], "deny": [Rule]}` with `Rule = {"field", "match", "values"}`; `match` is `equals` (the default) or `regex`. Empty lists accept every event.
+
+An author allowlist is an endpoint `allow` rule on `author` (for example `{"field": "author", "values": ["alice", "bob"]}`); there is no global author setting. `WEBHOOK_BOT_LOGINS` stays global: it is the self-loop guard (`self_event`) and runs before any filter.
+
+- Order: the first deny rule (in list order) that matches ignores the event with `filter_denied: <field>`; otherwise the first allow rule that does not match ignores it with `filter_not_allowed: <field>`. Allow rules combine with AND, the values within one rule with OR.
+- Fields per type: `github-issue` and `gitlab-issue` offer `author`, `actor`, `repo`, `labels`, `title`, `body`, `comment`, `kind`, `action`; `github-pr` and `gitlab-mr` add `source_branch` and `target_branch`; `grafana-alert` offers `labels`, `title`, `body`. A field the event does not carry (for example `comment` on a non-comment event) never matches: it fails an allow rule and never trips a deny rule. A list field (forge `labels`) matches when any element matches.
+- Not applicable, and why: `grafana-alert` has no `author`, `actor`, `repo` or `comment` (alerts carry none), no `kind` (always an alert) and no `action` (a non-firing alert is already `resolved`); issue types have no `source_branch` or `target_branch` (issues have no branch), and a `issue_comment` on a pull request carries none either, so they are absent there. Not offered for any type: `number`, `url`, `draft`, `changed` (the built-in rules already decide drafts and title-only edits), the delivery id, the dedup key, the priority and the raw payload.
+- `equals` compares whole values: case-insensitively for `author`, `actor`, `repo` and forge `labels`, exactly for every other field.
+- `regex` is an unanchored search; anchor with `^...$`, use `(?i)` for case-insensitivity. Patterns use RE2 syntax (the `google-re2` engine): matching takes time linear in the text, and backreferences and lookaround are refused when the filters are saved.
+- Grafana `labels` values are `key=value` (split on the first `=`, non-empty key) and match the alert group's common labels: `equals` compares the label's value exactly, `regex` searches it with the part after `=`. A key the alert group does not carry never matches.
+- Window: a regex reads at most 65536 characters of a field (of each list element, of each label value). A longer text fails closed instead of being cut: a regex rule on it never satisfies an allow rule and always trips a deny rule, so padding cannot push denied content past the window and an end anchor cannot match at a cut point. `equals` rules are unaffected.
+- Bounds, checked on save: at most 20 rules per list, 1 to 50 values per rule, each value 1 to 256 characters.
+
 ## Agent reuse
 
 Each agent preset has a boolean `reuse_running_agent`, off by default. When it is on for an endpoint's preset, events about the same item (the same repository and issue or merge request number, or the same alert group, which is the event's dedup key on that endpoint) go to the agent already working on that item:
@@ -84,11 +98,13 @@ An event has one of five statuses: `new` (queued), `in-progress` (claimed, runni
 | Reason | Status | Meaning |
 |---|---|---|
 | `self_event` | `ignored` | the actor is one of `WEBHOOK_BOT_LOGINS` |
-| `author_not_allowed` | `ignored` | author not in `WEBHOOK_ALLOWED_AUTHORS` |
 | `resolved` | `ignored` | a Grafana alert that is not firing |
 | `action_ignored` | `ignored` | an action that starts no work (closed, labeled, draft merge request, title-only edit) |
 | `type_mismatch` | `ignored` | a provider event of another endpoint type |
 | `unsupported_event` | `ignored` | not a supported provider event |
+| `filter_denied` | `ignored` | a deny rule of the endpoint matched; written `filter_denied: <field>` |
+| `filter_not_allowed` | `ignored` | an allow rule of the endpoint did not match; written `filter_not_allowed: <field>` |
+| `filter_error` | `ignored` | the endpoint's filters could not be evaluated (fails closed; never expected after saving) |
 | `duplicate` | `ignored` | the same delivery id again, or a queued event replaced by a newer one |
 | `queue_full` | `ignored` | `WEBHOOK_MAX_QUEUE` queued events reached |
 | `endpoint_removed` | `ignored` | the endpoint was deleted while the event was queued |
@@ -144,7 +160,7 @@ mise run test:e2e    # end-to-end tests
 
 ## Ingest
 
-`POST /webhook/{suffix}` is the only ingest path. It is served by the public `ingest` Deployment (no SSO). Each endpoint has a type (`grafana-alert`, `gitlab-issue`, `gitlab-mr`, `github-issue`, `github-pr`), a preset, an optional prompt template and HTTP basic-auth credentials.
+`POST /webhook/{suffix}` is the only ingest path. It is served by the public `ingest` Deployment (no SSO). After authentication, the body cap, JSON parsing, normalize and the built-in rules (`classify`), the endpoint's filters (see Filters) run; a built-in reason wins over a filter. A delivery that fails a filter is accepted (202) and stored `ignored` with the reason, never queued. Each endpoint has a type (`grafana-alert`, `gitlab-issue`, `gitlab-mr`, `github-issue`, `github-pr`), a preset, an optional prompt template and HTTP basic-auth credentials.
 
 | Status | Meaning |
 |---|---|
@@ -186,7 +202,7 @@ AUTH="Authorization: Bearer $TOKEN"
 
 ### `GET /webhooks/api/v1/endpoints`
 
-Lists endpoints: 200, an array of `{id, suffix, url, type, preset_id, prompt_template, username, created_at, credentials_rotated_at}`. Never carries a password.
+Lists endpoints: 200, an array of `{id, suffix, url, type, preset_id, prompt_template, filters, username, created_at, credentials_rotated_at}`. Never carries a password.
 
 ```
 curl -H "$AUTH" $API/endpoints
@@ -194,12 +210,22 @@ curl -H "$AUTH" $API/endpoints
 
 ### `POST /webhooks/api/v1/endpoints`
 
-Body `{type, preset_id, suffix?, username?, password?, prompt_template?}`; a missing suffix, username or password is generated (password at least `WEBHOOK_MIN_PASSWORD_LENGTH` characters when given). Response 201: the endpoint view plus `password`, shown only here (`Cache-Control: no-store`). Errors: 422 `invalid_request` (bad type, suffix, credentials or template), 422 `unknown_preset` (also a `preset_id` that is not a UUID), 409 `suffix_taken`, 502 `orchestrator_auth`, 503 `orchestrator_unavailable`.
+Body `{type, preset_id, suffix?, username?, password?, prompt_template?, filters?}` where `filters` is `{allow: [rule], deny: [rule]}` and a rule is `{field, match: "equals" | "regex" (default equals), values: [string]}` (see Filters; the view always carries `filters`, empty lists when unset); a missing suffix, username or password is generated (password at least `WEBHOOK_MIN_PASSWORD_LENGTH` characters when given). Response 201: the endpoint view plus `password`, shown only here (`Cache-Control: no-store`). Errors: 422 `invalid_request` (bad type, suffix, credentials, template or filter rule; the message names the rule path such as `filters.deny[0]`), 422 `unknown_preset` (also a `preset_id` that is not a UUID), 409 `suffix_taken`, 502 `orchestrator_auth`, 503 `orchestrator_unavailable`.
 
 ```
 curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"type":"github-pr","preset_id":"<preset id>","prompt_template":"Review {{ repo }}#{{ number }}: {{ title }}"}' \
   $API/endpoints
+```
+
+### `PUT /webhooks/api/v1/endpoints/{id}/filters`
+
+Replaces the endpoint's filters. Body `{allow?: [rule], deny?: [rule]}` (a missing list is empty). Response 200: the endpoint view. Errors: 404 `not_found`, 422 `invalid_request` (the message names the rule path, for example a field that does not apply to the endpoint type).
+
+```
+curl -X PUT -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"deny":[{"field":"labels","values":["env=staging"]}]}' \
+  $API/endpoints/3/filters
 ```
 
 ### `POST /webhooks/api/v1/endpoints/{id}/rotate`
@@ -236,7 +262,7 @@ curl -H "$AUTH" $API/events/42
 
 ### `POST /webhooks/api/v1/templates/preview`
 
-Renders a template against an example JSON payload and returns the prompt; nothing is stored. Body `{template, type, example}`: `type` is an endpoint type and `example` the provider payload of that type (it is normalized exactly as at ingest, so the context variables are the real ones; `payload` is `example`). Response 200 `{prompt}`. Errors: 422 `invalid_request` when `type` is unknown, the example is not a payload of that type, or the template does not compile or render (the message names the cause).
+Renders a template and/or evaluates filters against an example JSON payload; nothing is stored. Body `{template?, type, example, filters?}`, at least one of `template` and `filters` required: `type` is an endpoint type and `example` the provider payload of that type (it is normalized exactly as at ingest, so the context variables are the real ones; `payload` is `example`). Response 200 `{prompt, filters}`: `prompt` is the rendered text, or null without a `template`; `filters` is `{passed, reason}` (the same verdict as ingest: a built-in reason such as `self_event` or `action_ignored` wins, then `filter_denied: <field>`, `filter_not_allowed: <field>` or `filter_error`; `reason` is null when it passes), or null without `filters`. Errors: 422 `invalid_request` when neither is given (`template or filters: required`), a filter rule is invalid for `type` (the message names the rule path), `type` is unknown, the example is not a payload of that type, or the template does not compile or render (the message names the cause).
 
 ```
 curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
@@ -246,7 +272,7 @@ curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
 
 ### `GET /webhooks/api/v1/meta`
 
-Response 200: `{public_base_url, ingest_path_prefix, types, limits}` where `limits` has `max_in_progress`, `max_in_progress_per_endpoint`, `max_queue`, `max_body_bytes`, `run_timeout_seconds` and `auth_failures_per_minute`.
+Response 200: `{public_base_url, ingest_path_prefix, types, filter_fields, limits}` where `filter_fields` maps each endpoint type to the fields a filter rule may use and `limits` has `max_in_progress`, `max_in_progress_per_endpoint`, `max_queue`, `max_body_bytes`, `run_timeout_seconds` and `auth_failures_per_minute`.
 
 ```
 curl -H "$AUTH" $API/meta
