@@ -115,7 +115,7 @@ def test_template_strict_undefined():
 
 
 def test_template_output_size_bounded():
-    out = render(make(), "{% for i in range(100000) %}0123456789{% endfor %}")
+    out = render(make(), "{% for i in range(10000) %}0123456789{% endfor %}")
     assert len(out.encode()) < MAX_BODY_BYTES + 100
     assert "[truncated]" in out
     with pytest.raises(TemplateError):
@@ -141,3 +141,43 @@ def test_template_preview_with_example_json():
     assert out.startswith("v ")
     with pytest.raises(TemplateError):
         preview("{{ payload.zzz }}", {})
+
+
+def test_template_range_capped():
+    for tpl in ("{% for i in range(10**9) %}{% endfor %}", "{{ range(10**9) | list }}"):
+        with pytest.raises(TemplateError):
+            render(make(), tpl)
+    assert render(make(), "{{ range(10000) | list | length }}") == "10000"
+
+
+def test_template_overflow_error_is_template_error():
+    with pytest.raises(TemplateError):
+        render(make(), "{{ 1e308 * 10 ** 400 }}")
+    with pytest.raises(TemplateError):
+        render(make(), "{{ 10.0 ** 1000 }}")
+
+
+def test_template_power_bound():
+    with pytest.raises(TemplateError):
+        render(make(), "{{ 10**1000**1000**1000 }}")
+    with pytest.raises(TemplateError):
+        render(make(), "{{ 9999999 * 9999999 ** 999 * 9 ** 999 * 8 ** 999 }}")
+    assert render(make(), "{{ 2**10 }}") == "1024"
+
+
+def test_template_nested_loop_times_out():
+    import time
+
+    tpl = "{% for i in range(10000) %}{% for j in range(10000) %}{% endfor %}{% endfor %}"
+    start = time.monotonic()
+    with pytest.raises(TemplateError, match="timed out"):
+        render(make(), tpl, timeout=0.5)
+    assert time.monotonic() - start < 3
+
+
+def test_template_oversize_text_rejected():
+    big = "x" * (16 * 1024 + 1)
+    with pytest.raises(TemplateError, match="16384"):
+        render(make(), big)
+    with pytest.raises(ValueError, match="16384"):
+        validate_template(big)

@@ -8,6 +8,7 @@ frame them themselves. Any render failure raises `TemplateError` (the event fail
 """
 
 import json
+import multiprocessing
 from dataclasses import asdict
 from typing import Any
 from xml.sax.saxutils import escape, quoteattr
@@ -41,29 +42,54 @@ def _from_json(value: Any) -> Any:
         raise ValueError(f"from_json: invalid JSON: {exc}") from exc
 
 
+MAX_TEMPLATE_BYTES = 16 * 1024
+MAX_RANGE = 10_000
+MAX_EXPONENT = 1000
+MAX_INT_BITS = 14_300  # about 4300 decimal digits
+DEFAULT_TIMEOUT_SECONDS = 2.0
+
+
+def _bounded_range(*args: int) -> range:
+    result = range(*args)
+    if len(result) > MAX_RANGE:
+        raise ValueError(f"range is limited to {MAX_RANGE} items")
+    return result
+
+
 class _BoundedEnvironment(ImmutableSandboxedEnvironment):
-    """Refuses sequence repetition and powers large enough to exhaust memory."""
+    """Refuses sequence repetition, powers and products large enough to exhaust CPU or memory."""
 
     # Also stops the compiler from constant-folding these operators before call_binop runs.
     intercepted_binops = frozenset({"*", "**"})
 
     def call_binop(self, context, operator, left, right):
-        if operator == "*" and isinstance(left, int) and not isinstance(right, int):
-            left, right = right, left
-        if (
-            operator == "*"
-            and isinstance(right, int)
-            and hasattr(left, "__len__")
-            and len(left) * max(right, 0) > MAX_BODY_BYTES * 4
-        ):
-            raise SecurityError("repetition result too large")
-        if operator == "**" and isinstance(right, int) and right > 1024:
-            raise SecurityError("exponent too large")
+        if operator == "*":
+            if isinstance(left, int) and not isinstance(right, int | float):
+                left, right = right, left
+            if isinstance(right, int) and hasattr(left, "__len__"):
+                if len(left) * max(right, 0) > MAX_BODY_BYTES * 4:
+                    raise SecurityError("repetition result too large")
+            elif (
+                isinstance(left, int)
+                and isinstance(right, int)
+                and left.bit_length() + right.bit_length() > MAX_INT_BITS
+            ):
+                raise SecurityError("product too large")
+        elif operator == "**":
+            if isinstance(right, int | float) and abs(right) > MAX_EXPONENT:
+                raise SecurityError("exponent too large")
+            if (
+                isinstance(left, int)
+                and isinstance(right, int)
+                and left.bit_length() * right > MAX_INT_BITS
+            ):
+                raise SecurityError("power too large")
         return super().call_binop(context, operator, left, right)
 
 
 _env = _BoundedEnvironment(autoescape=False, undefined=StrictUndefined)
 _env.filters["from_json"] = _from_json
+_env.globals["range"] = _bounded_range
 
 
 def _block(event: NormalizedEvent) -> str:
@@ -104,20 +130,67 @@ def _default(event: NormalizedEvent) -> str:
     return f"{preamble}\n\n{_block(event)}"
 
 
-def _render_template(event: NormalizedEvent, template: str, payload: dict[str, Any] | None) -> str:
+def _check_size(template: str) -> None:
+    if len(template.encode()) > MAX_TEMPLATE_BYTES:
+        raise ValueError(f"template is longer than the {MAX_TEMPLATE_BYTES} byte limit")
+
+
+def _render_in_process(
+    event: NormalizedEvent, template: str, payload: dict[str, Any] | None
+) -> str:
     context = asdict(event)
     context.update(event=_block(event), payload=payload if payload is not None else {})
-    try:
-        chunks: list[str] = []
-        size = 0
-        for chunk in _env.from_string(template).generate(**context):
-            chunks.append(chunk)
-            size += len(chunk.encode())
-            if size > MAX_BODY_BYTES:
-                break
-    except (Jinja2Error, SecurityError, ValueError, TypeError, AttributeError, KeyError) as exc:
-        raise TemplateError(f"{type(exc).__name__}: {exc}") from exc
+    chunks: list[str] = []
+    size = 0
+    for chunk in _env.from_string(template).generate(**context):
+        chunks.append(chunk)
+        size += len(chunk.encode())
+        if size > MAX_BODY_BYTES:
+            break
     return _truncate("".join(chunks))
+
+
+def _child(conn, event, template, payload) -> None:
+    try:
+        conn.send((True, _render_in_process(event, template, payload)))
+    except BaseException as exc:
+        conn.send((False, f"{type(exc).__name__}: {exc}"))
+    finally:
+        conn.close()
+
+
+def _mp_context():
+    methods = multiprocessing.get_all_start_methods()
+    return multiprocessing.get_context("fork" if "fork" in methods else "spawn")
+
+
+def _render_template(
+    event: NormalizedEvent, template: str, payload: dict[str, Any] | None, timeout: float
+) -> str:
+    try:
+        _check_size(template)
+    except ValueError as exc:
+        raise TemplateError(str(exc)) from exc
+    ctx = _mp_context()
+    parent, child = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=_child, args=(child, event, template, payload), daemon=True)
+    proc.start()
+    child.close()
+    try:
+        if not parent.poll(timeout):
+            raise TemplateError("template render timed out")
+        try:
+            ok, value = parent.recv()
+        except EOFError as exc:
+            raise TemplateError("template render failed: worker died") from exc
+    finally:
+        parent.close()
+        if proc.is_alive():
+            proc.kill()
+        proc.join()
+    if not ok:
+        raise TemplateError(value)
+    return value
 
 
 def render(
@@ -126,13 +199,19 @@ def render(
     *,
     update: bool = False,
     payload: dict[str, Any] | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> str:
-    text = _default(event) if template is None else _render_template(event, template, payload)
+    """Render the prompt; a template runs in a killable child process bounded by `timeout`."""
+    if template is None:
+        text = _default(event)
+    else:
+        text = _render_template(event, template, payload, timeout)
     return f"{UPDATE_PREFIX}\n\n{text}" if update else text
 
 
 def validate_template(text: str) -> None:
     """Raise ValueError when `text` is not a valid template (syntax, unknown filter or tag)."""
+    _check_size(text)
     try:
         _env.from_string(text)
     except Jinja2Error as exc:
@@ -162,8 +241,11 @@ SAMPLE_EVENT = NormalizedEvent(
 
 
 def preview(
-    template: str, payload: dict[str, Any] | None = None, event: NormalizedEvent | None = None
+    template: str,
+    payload: dict[str, Any] | None = None,
+    event: NormalizedEvent | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> str:
     """Render `template` against an example payload (and a sample event) to check it."""
     validate_template(template)
-    return render(event or SAMPLE_EVENT, template, payload=payload)
+    return render(event or SAMPLE_EVENT, template, payload=payload, timeout=timeout)

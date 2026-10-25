@@ -25,6 +25,7 @@ class WebhookSettings(BaseServiceSettings):
     auth_failures_per_minute: int = Field(10, ge=1)
     trusted_proxies: CsvList = []
     min_password_length: int = Field(16, ge=1)
+    template_timeout_seconds: float = Field(2.0, gt=0)
 
     @field_validator("public_base_url")
     @classmethod
