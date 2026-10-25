@@ -422,6 +422,32 @@ class EventStore:
             )
 
 
+async def prune(conn: psycopg.AsyncConnection, *, retention_days: int, batch: int) -> int:
+    """Delete up to `batch` final events (handled, ignored, failed) idle for `retention_days`.
+
+    Never touches `new` or `in-progress` rows. A row that survives but points at a pruned row
+    through update_of/duplicate_of has the reference nulled first. Returns the rows deleted.
+    """
+    async with conn.transaction():
+        cur = await conn.execute(
+            "SELECT id FROM events WHERE status IN ('handled', 'ignored', 'failed') "
+            "AND updated_at < now() - make_interval(days => %s) ORDER BY id LIMIT %s "
+            "FOR UPDATE SKIP LOCKED",
+            (retention_days, batch),
+        )
+        ids = [r[0] for r in await cur.fetchall()]
+        if not ids:
+            return 0
+        await conn.execute(
+            "UPDATE events SET update_of = CASE WHEN update_of = ANY(%(ids)s) THEN NULL "
+            "ELSE update_of END, duplicate_of = CASE WHEN duplicate_of = ANY(%(ids)s) THEN NULL "
+            "ELSE duplicate_of END WHERE update_of = ANY(%(ids)s) OR duplicate_of = ANY(%(ids)s)",
+            {"ids": ids},
+        )
+        await conn.execute("DELETE FROM events WHERE id = ANY(%s)", (ids,))
+    return len(ids)
+
+
 async def _now(conn: psycopg.AsyncConnection) -> datetime:
     cur = await conn.execute("SELECT now()")
     row = await cur.fetchone()

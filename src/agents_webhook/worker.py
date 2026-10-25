@@ -64,6 +64,8 @@ CHANNEL = "webhook_events"
 RUN_KIND = "webhook:event"
 UNAVAILABLE_LOG_SECONDS = 60.0
 REUSE_FALLBACK = "reuse_fallback"
+PRUNE_INTERVAL_SECONDS = 3600.0
+PRUNE_BATCH = 1000
 
 
 def run_ref(event: events.Event) -> runs.RunRef:
@@ -115,6 +117,8 @@ class Worker:
         self._fallback_store = _FallbackStore(self.store)
         self._clock = clock
         self._unavailable_logged: dict[tuple[str, int], float] = {}
+        self.prune_batch = PRUNE_BATCH
+        self._last_prune: float | None = None
         # Per tick: endpoints whose preset opts in to reuse, and endpoints whose preset could
         # not be read (their claimed rows are held and released at the end of the tick).
         self._reuse: set[int] = set()
@@ -138,6 +142,27 @@ class Worker:
         for id in held:
             async with self.pool.connection() as conn:
                 await events.release(conn, id)
+        await self.prune_events()
+
+    async def prune_events(self) -> None:
+        """Delete final events past the retention window, in batches, at most hourly."""
+        now = self._clock()
+        if self._last_prune is not None and now - self._last_prune < PRUNE_INTERVAL_SECONDS:
+            return
+        self._last_prune = now
+        total = 0
+        while True:
+            async with self.pool.connection() as conn:
+                n = await events.prune(
+                    conn,
+                    retention_days=self.settings.events_retention_days,
+                    batch=self.prune_batch,
+                )
+            total += n
+            if n < self.prune_batch:
+                break
+        if total:
+            log.info("retention: pruned %d events", total)
 
     async def route(self, claimed: events.Claimed) -> bool:
         """True when the row was routed (delivered to a running agent, fallen back, or left

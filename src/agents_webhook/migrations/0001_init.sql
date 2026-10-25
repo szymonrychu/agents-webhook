@@ -3,7 +3,9 @@
 --   endpoints: the api only (create, rotate credentials, change preset/template, delete).
 --   events:    a queue table. ingest inserts rows and replaces payloads of `new` rows and
 --              bumps deliveries; the worker moves status, only through status-guarded UPDATEs.
---              The api only reads it.
+--              The api only reads it. The worker is also the single maintenance writer: it
+--              deletes final events past the retention window (nulling update_of/duplicate_of
+--              references to them).
 
 CREATE TABLE endpoints (
     id                     bigserial PRIMARY KEY,

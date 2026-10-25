@@ -30,7 +30,7 @@ Every setting is an environment variable. The first block is read by all subcomm
 | `WEBHOOK_MAX_BODY_BYTES` | 5242880 (5 MiB) | largest accepted request body |
 | `WEBHOOK_RUN_TIMEOUT_SECONDS` | 3600 | an in-progress event older than this fails `timeout` |
 | `WEBHOOK_POLL_SECONDS` | 5 | worker tick when no NOTIFY arrives |
-| `WEBHOOK_EVENTS_RETENTION_DAYS` | 30 | declared retention window; no process prunes events at present |
+| `WEBHOOK_EVENTS_RETENTION_DAYS` | 30 | the worker deletes handled, ignored and failed events idle longer than this, hourly, in batches of 1000 |
 | `WEBHOOK_AUTH_FAILURES_PER_MINUTE` | 10 | failed authentications per client per minute before 429 |
 | `WEBHOOK_TRUSTED_PROXIES` | empty | comma-separated CIDRs whose `X-Forwarded-For` is trusted |
 | `WEBHOOK_MIN_PASSWORD_LENGTH` | 16 | shortest accepted caller-chosen password |

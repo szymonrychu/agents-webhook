@@ -594,3 +594,67 @@ async def test_singleton_lost_lock_stops_with_lost_lock(db, conn, pool, client, 
     )
     with pytest.raises(LostLock):
         await asyncio.wait_for(task, 5)
+
+
+async def age(conn, ids, days: float, status: str | None = None) -> None:
+    await conn.execute(
+        "UPDATE events SET updated_at = now() - make_interval(days => %s), "
+        "status = COALESCE(%s, status) WHERE id = ANY(%s)",
+        (days, status, list(ids)),
+    )
+
+
+async def count_ids(conn, ids) -> int:
+    cur = await conn.execute("SELECT count(*) FROM events WHERE id = ANY(%s)", (list(ids),))
+    return (await cur.fetchone())[0]
+
+
+async def test_retention_prunes_old_final_events(conn, make_endpoint, make_worker):
+    ep = await make_endpoint()
+    ids = [await rec(conn, ep, ev(f"k/{i}")) for i in range(8)]
+    old_handled, old_ignored, old_failed, old_new, old_prog, recent, parent, child = ids
+    await age(conn, [old_handled], 40, "handled")
+    await age(conn, [old_ignored], 40, "ignored")
+    await age(conn, [old_failed], 40, "failed")
+    await age(conn, [old_new], 40)
+    await age(conn, [old_prog], 40, "in-progress")
+    await age(conn, [recent], 5, "handled")
+    # an old final row referenced by a kept recent row, and an old final row referencing it
+    await age(conn, [parent], 40, "handled")
+    await age(conn, [child], 1, "handled")
+    await conn.execute("UPDATE events SET duplicate_of = %s WHERE id = %s", (parent, child))
+    await conn.execute("UPDATE events SET update_of = %s WHERE id = %s", (old_failed, old_ignored))
+
+    w = make_worker(events_retention_days=30)
+    await w.prune_events()
+
+    assert await count_ids(conn, [old_handled, old_ignored, old_failed, parent]) == 0
+    assert await count_ids(conn, [old_new, old_prog, recent, child]) == 4
+    assert (await row(conn, child)).duplicate_of is None
+
+
+async def test_retention_batches_and_runs_at_most_hourly(
+    conn, make_endpoint, pool, client, settings
+):
+    ep = await make_endpoint()
+    ids = [await rec(conn, ep, ev(f"k/{i}")) for i in range(5)]
+    await age(conn, ids, 40, "handled")
+
+    async with pool.connection() as c:
+        assert await events.prune(c, retention_days=30, batch=2) == 2
+    assert await count_ids(conn, ids) == 3
+
+    now = [1000.0]
+    w = worker.Worker(settings, pool, client, clock=lambda: now[0])
+    w.prune_batch = 2
+    await w.prune_events()
+    assert await count_ids(conn, ids) == 0
+
+    fresh = await rec(conn, ep, ev("k/fresh"))
+    await age(conn, [fresh], 40, "handled")
+    now[0] += 60
+    await w.prune_events()
+    assert await count_ids(conn, [fresh]) == 1
+    now[0] += 3600
+    await w.prune_events()
+    assert await count_ids(conn, [fresh]) == 0
