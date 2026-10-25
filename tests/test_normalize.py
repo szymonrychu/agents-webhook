@@ -309,3 +309,38 @@ def test_classify_title_only_edit_ignored_body_edit_accepted():
     )
     assert _classify(gl_title) == "action_ignored"
     assert _classify(gl_body) is None
+
+
+def test_classify_github_pr_edit_ignored():
+    ev = normalize(
+        "github-pr",
+        p.gh_headers("pull_request"),
+        p.gh_pull_request("edited", changes={"body": {"from": "x"}}),
+    )
+    assert _classify(ev) == "action_ignored"
+
+
+@pytest.mark.parametrize("key", ["draft", "work_in_progress"])
+def test_gitlab_draft_to_ready_is_ready_for_review(key):
+    changes = {
+        key: {"previous": True, "current": False},
+        "title": {"previous": "Draft: Add thing", "current": "Add thing"},
+    }
+    ev = normalize(
+        "gitlab-mr", p.gl_headers("Merge Request Hook"), p.gl_merge_request("update", changes)
+    )
+    assert ev.action == "ready_for_review"
+    assert _classify(ev) is None
+
+
+def test_gitlab_ready_to_draft_is_ignored():
+    changes = {
+        "draft": {"previous": False, "current": True},
+        "title": {"previous": "x", "current": "Draft: x"},
+    }
+    ev = normalize(
+        "gitlab-mr",
+        p.gl_headers("Merge Request Hook"),
+        p.gl_merge_request("update", changes, draft=True),
+    )
+    assert _classify(ev) == "action_ignored"

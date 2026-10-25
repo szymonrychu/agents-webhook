@@ -15,7 +15,7 @@ ENDPOINT_TYPES = ("grafana-alert", "gitlab-issue", "gitlab-mr", "github-issue", 
 
 # Actions that start or continue work; anything else is `action_ignored`.
 _HANDLED_ACTIONS = {
-    "mr": {"opened", "reopened", "synchronize", "ready_for_review", "edited"},
+    "mr": {"opened", "reopened", "synchronize", "ready_for_review"},
     "issue": {"opened", "reopened", "edited"},
     "comment": {"created", "submitted"},
 }
@@ -138,6 +138,10 @@ def _github(
     )
 
 
+def _became_ready(change: Any) -> bool:
+    return isinstance(change, dict) and bool(change.get("previous")) and not change.get("current")
+
+
 def _gitlab(
     endpoint_type: str, headers: Mapping[str, str], payload: dict[str, Any]
 ) -> NormalizedEvent:
@@ -174,7 +178,9 @@ def _gitlab(
     if kind != "comment":
         action = _GITLAB_ACTIONS.get(action, action)
         if action == "update":
-            if changed == ("title",):
+            if is_mr and any(_became_ready(changes.get(k)) for k in ("draft", "work_in_progress")):
+                action = "ready_for_review"
+            elif changed == ("title",):
                 action = "edited"
             elif changed == ("labels",):
                 action = "labeled"
