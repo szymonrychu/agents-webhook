@@ -3,7 +3,7 @@
 import ipaddress
 
 from agents_common.settings import BaseServiceSettings, CsvList
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
 
 
@@ -41,3 +41,13 @@ class WebhookSettings(BaseServiceSettings):
             except ValueError:
                 raise ValueError(f"WEBHOOK_TRUSTED_PROXIES::not a CIDR: {item!r}") from None
         return value
+
+
+class LocalSettings(WebhookSettings):
+    """Settings for the subcommands that never talk to the orchestrator (migrate, ingest)."""
+
+    orchestrator_url: str = ""
+
+    @model_validator(mode="after")
+    def _token_from_file(self):  # overrides the base check: no orchestrator token is needed
+        return self

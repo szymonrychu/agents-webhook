@@ -17,7 +17,7 @@ from agents_common.settings import SettingsError, load_settings
 from agents_webhook import __version__
 from agents_webhook.api.app import create_api_app
 from agents_webhook.ingest.app import create_ingest_app
-from agents_webhook.settings import WebhookSettings
+from agents_webhook.settings import LocalSettings, WebhookSettings
 from agents_webhook.worker import run_worker
 
 EXIT_BAD_SETTINGS = 78
@@ -181,6 +181,8 @@ def _cmd_worker(settings: WebhookSettings) -> int:
     return _run(settings, body, client=True)
 
 
+LOCAL_COMMANDS = {"migrate", "ingest"}  # no orchestrator URL or token
+
 COMMANDS = {
     "migrate": _cmd_migrate,
     "ingest": _cmd_ingest,
@@ -198,6 +200,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load(command: str) -> WebhookSettings:
+    """migrate and ingest load without the orchestrator variables; api and worker require them."""
+    if command not in LOCAL_COMMANDS:
+        return load_settings(WebhookSettings)
+    try:
+        return load_settings(LocalSettings)
+    except SettingsError as exc:
+        problems = {k: v for k, v in exc.problems.items() if "ORCHESTRATOR" not in k}
+        if not problems:
+            # only the orchestrator variables were reported: the local settings are valid
+            return LocalSettings()
+        raise SettingsError(problems) from None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -205,7 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return 2
     try:
-        settings = load_settings(WebhookSettings)
+        settings = _load(args.command)
     except SettingsError as exc:
         print(exc, file=sys.stderr)
         return EXIT_BAD_SETTINGS

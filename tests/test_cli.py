@@ -52,7 +52,7 @@ def test_bad_settings_exit_78(name, env, capsys):
 def test_bad_settings_names_every_variable(env, capsys):
     env.delenv("WEBHOOK_ORCHESTRATOR_TOKEN")
     env.setenv("WEBHOOK_TRUSTED_PROXIES", "nope")
-    assert main(["ingest"]) == 78
+    assert main(["api"]) == 78
     err = capsys.readouterr().err
     assert "WEBHOOK_ORCHESTRATOR_TOKEN" in err
     assert "WEBHOOK_TRUSTED_PROXIES" in err
@@ -189,3 +189,50 @@ def test_config_body_read_timeout_passes_fast_bodies():
     sent = _run_body_timeout(fast)
     assert sent[0][0] == "body"
     assert sent[1]["status"] == 200
+
+
+def test_settings_per_subcommand(env, monkeypatch, capsys):
+    env.delenv("WEBHOOK_ORCHESTRATOR_URL")
+    env.delenv("WEBHOOK_ORCHESTRATOR_TOKEN")
+    calls = {}
+
+    class Pool:
+        async def close(self):
+            pass
+
+    async def fake_open_pool(url, *a, **k):
+        return Pool()
+
+    class FakeServer:
+        def __init__(self, config):
+            calls["config"] = config
+            self.should_exit = False
+
+        async def serve(self):
+            calls["served"] = True
+
+    def no_client(*a, **k):
+        raise AssertionError("ingest must not construct an orchestrator client")
+
+    monkeypatch.setattr(cli, "open_pool", fake_open_pool)
+    monkeypatch.setattr(cli, "_Server", FakeServer)
+    monkeypatch.setattr(cli, "OrchestratorClient", no_client)
+    monkeypatch.setattr(cli, "run_migrations", lambda url, name: ["0001"])
+    assert main(["migrate"]) == 0
+    assert main(["ingest"]) == 0
+    assert calls["served"]
+    for name in ("api", "worker"):
+        assert main([name]) == 78
+        err = capsys.readouterr().err
+        assert "WEBHOOK_ORCHESTRATOR_URL" in err
+        assert "WEBHOOK_ORCHESTRATOR_TOKEN" in err
+
+
+def test_ingest_still_validates_own_settings(env, capsys):
+    env.delenv("WEBHOOK_ORCHESTRATOR_URL")
+    env.delenv("WEBHOOK_ORCHESTRATOR_TOKEN")
+    env.setenv("WEBHOOK_TRUSTED_PROXIES", "nope")
+    assert main(["ingest"]) == 78
+    err = capsys.readouterr().err
+    assert "WEBHOOK_TRUSTED_PROXIES" in err
+    assert "ORCHESTRATOR" not in err
