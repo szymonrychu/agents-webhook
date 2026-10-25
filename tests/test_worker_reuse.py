@@ -586,3 +586,67 @@ async def test_restart_orchestrator_down_at_running_check_retries_next_tick(
     assert (r.update_of, r.cluster_id) == (first.id, cluster["id"])
     assert r.message_id is not None
     assert len(fake.clusters) == 1
+
+
+# --- non-retryable delivery errors ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", [400, 422])
+async def test_discard_deliver_4xx_falls_back_to_a_new_cluster(
+    conn, fake, make_endpoint, make_worker, status
+):
+    ep = await make_endpoint(REUSE)
+    w = make_worker()
+    first, cluster = await start_first(conn, fake, w, ep)
+    fake.fail_next("post_message", status)
+
+    second = await rec(conn, ep, ev(action="synchronize"))
+    await w.tick()
+
+    r = await row(conn, second)
+    assert (r.status, r.update_of, r.cluster_slug) == ("in-progress", None, f"wh-{second}")
+    assert len(messages_of(fake, cluster["id"])) == 1
+    new = cluster_of(fake, f"wh-{second}")
+    assert messages_of(fake, new["id"])[0]["text"] == first_text(r)
+
+
+async def test_discard_deliver_4xx_then_failed_fallback_fails_with_reuse_fallback(
+    conn, fake, make_endpoint, make_worker
+):
+    ep = await make_endpoint(REUSE)
+    w = make_worker()
+    first, cluster = await start_first(conn, fake, w, ep)
+    fake.fail_next("post_message", 422)
+    fake.fail_next("create_cluster", 422)
+
+    second = await rec(conn, ep, ev(action="synchronize"))
+    await w.tick()
+
+    r = await row(conn, second)
+    assert (r.status, r.reason, r.update_of) == ("failed", "reuse_fallback: internal", None)
+    assert len(fake.clusters) == 1
+
+
+async def test_restart_stuck_update_row_without_message_times_out(
+    conn, fake, make_endpoint, make_worker, monkeypatch
+):
+    ep = await make_endpoint(REUSE)
+    w = make_worker(run_timeout_seconds=3600)
+    first, cluster = await start_first(conn, fake, w, ep)
+    second = await rec(conn, ep, ev(action="synchronize"))
+
+    async def down(self, cluster_id):
+        raise OrchestratorUnavailable("down")
+
+    monkeypatch.setattr(OrchestratorClient, "get_cluster", down)
+    await w.tick()
+    r = await row(conn, second)
+    assert (r.status, r.update_of, r.message_id) == ("in-progress", first.id, None)
+
+    await conn.execute(
+        "UPDATE events SET started_at = now() - interval '2 hours' WHERE id = %s", (second,)
+    )
+    await w.tick()
+    r = await row(conn, second)
+    assert (r.status, r.reason) == ("failed", "timeout")
+    assert len(messages_of(fake, cluster["id"])) == 1

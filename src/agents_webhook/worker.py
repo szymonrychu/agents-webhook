@@ -19,7 +19,9 @@ running (exists, desired `active`, first turn completed or not), delivered there
 message; it bypasses the caps and is handled once the message is `sent`. A cluster that is gone
 at check time, refuses the post, or cancels or fails the message before `sent` makes the row
 fall back once: a first dispatch as `wh-<id>` when the caps allow, else back to `new` keeping
-its FIFO place. A fallback row that then fails records `reuse_fallback` in its reason.
+its FIFO place; a 4xx on the cluster check or the post falls back the same way. A fallback
+row that then fails records `reuse_fallback` in its reason. An update row still without a
+message after `run_timeout_seconds` (the orchestrator stayed unavailable) fails `timeout`.
 
 An unavailable orchestrator leaves the row as it is for the next tick (logged once per row per
 minute); a 4xx on create or post fails the row with the error code. The service never deletes
@@ -205,7 +207,10 @@ class Worker:
             self._unavailable(("event", event.id), exc)
             return
         except OrchestratorError as exc:
-            log.warning("event %s: delivery error, retrying: %s", event.id, exc)
+            if not 400 <= exc.status < 500:
+                raise
+            log.warning("event %s: delivery refused, falling back: %s", event.id, exc)
+            await self._fallback(event)
             return
         self._unavailable_logged.pop(("event", event.id), None)
         if delivered is None:
@@ -302,6 +307,13 @@ class Worker:
             return
         if event.reason == REUSE_FALLBACK:  # crashed between marking and clearing
             await self._fallback(event)
+            return
+        assert event.started_at is not None
+        if (datetime.now(UTC) - event.started_at).total_seconds() > (
+            self.settings.run_timeout_seconds
+        ):
+            log.warning("event %s: update not delivered in time", event.id)
+            await self.store.finish(event.id, "failed", "timeout")
             return
         async with self.pool.connection() as conn:
             parent = await events.get_event(conn, event.update_of)
