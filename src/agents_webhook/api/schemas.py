@@ -2,9 +2,25 @@
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class FilterRule(BaseModel):
+    field: str
+    match: Literal["equals", "regex"] = "equals"
+    values: list[str]
+
+
+class Filters(BaseModel):
+    allow: list[FilterRule] = []
+    deny: list[FilterRule] = []
+
+
+class FilterResult(BaseModel):
+    passed: bool
+    reason: str | None
 
 
 class EndpointIn(BaseModel):
@@ -14,6 +30,7 @@ class EndpointIn(BaseModel):
     username: str | None = None
     password: str | None = Field(default=None, repr=False)
     prompt_template: str | None = None
+    filters: Filters | None = None
 
     @field_validator("preset_id")
     @classmethod
@@ -38,6 +55,7 @@ class EndpointView(BaseModel):
     type: str
     preset_id: str
     prompt_template: str | None
+    filters: Filters
     username: str
     created_at: datetime
     credentials_rotated_at: datetime | None
@@ -86,13 +104,15 @@ class EventDetail(EventView):
 
 
 class PreviewIn(BaseModel):
-    template: str
+    template: str | None = None
     type: str
     example: Any
+    filters: Filters | None = None
 
 
 class PreviewOut(BaseModel):
-    prompt: str
+    prompt: str | None
+    filters: FilterResult | None
 
 
 class Limits(BaseModel):
@@ -108,4 +128,5 @@ class Meta(BaseModel):
     public_base_url: str
     ingest_path_prefix: str
     types: list[str]
+    filter_fields: dict[str, list[str]]
     limits: Limits

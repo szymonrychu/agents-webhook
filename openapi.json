@@ -21,6 +21,9 @@
             ],
             "title": "Credentials Rotated At"
           },
+          "filters": {
+            "$ref": "#/components/schemas/Filters"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
@@ -68,6 +71,7 @@
           "type",
           "preset_id",
           "prompt_template",
+          "filters",
           "username",
           "created_at",
           "credentials_rotated_at",
@@ -78,6 +82,16 @@
       },
       "EndpointIn": {
         "properties": {
+          "filters": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Filters"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "password": {
             "anyOf": [
               {
@@ -157,6 +171,9 @@
             ],
             "title": "Credentials Rotated At"
           },
+          "filters": {
+            "$ref": "#/components/schemas/Filters"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
@@ -200,6 +217,7 @@
           "type",
           "preset_id",
           "prompt_template",
+          "filters",
           "username",
           "created_at",
           "credentials_rotated_at"
@@ -723,6 +741,83 @@
         "title": "EventView",
         "type": "object"
       },
+      "FilterResult": {
+        "properties": {
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "passed",
+          "reason"
+        ],
+        "title": "FilterResult",
+        "type": "object"
+      },
+      "FilterRule": {
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "match": {
+            "default": "equals",
+            "enum": [
+              "equals",
+              "regex"
+            ],
+            "title": "Match",
+            "type": "string"
+          },
+          "values": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Values",
+            "type": "array"
+          }
+        },
+        "required": [
+          "field",
+          "values"
+        ],
+        "title": "FilterRule",
+        "type": "object"
+      },
+      "Filters": {
+        "properties": {
+          "allow": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/FilterRule"
+            },
+            "title": "Allow",
+            "type": "array"
+          },
+          "deny": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/FilterRule"
+            },
+            "title": "Deny",
+            "type": "array"
+          }
+        },
+        "title": "Filters",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -776,6 +871,16 @@
       },
       "Meta": {
         "properties": {
+          "filter_fields": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Filter Fields",
+            "type": "object"
+          },
           "ingest_path_prefix": {
             "title": "Ingest Path Prefix",
             "type": "string"
@@ -799,6 +904,7 @@
           "public_base_url",
           "ingest_path_prefix",
           "types",
+          "filter_fields",
           "limits"
         ],
         "title": "Meta",
@@ -809,9 +915,26 @@
           "example": {
             "title": "Example"
           },
+          "filters": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Filters"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "template": {
-            "title": "Template",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template"
           },
           "type": {
             "title": "Type",
@@ -819,7 +942,6 @@
           }
         },
         "required": [
-          "template",
           "type",
           "example"
         ],
@@ -828,13 +950,31 @@
       },
       "PreviewOut": {
         "properties": {
+          "filters": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "prompt": {
-            "title": "Prompt",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt"
           }
         },
         "required": [
-          "prompt"
+          "prompt",
+          "filters"
         ],
         "title": "PreviewOut",
         "type": "object"
@@ -1041,6 +1181,55 @@
           }
         },
         "summary": "Delete Endpoint"
+      }
+    },
+    "/webhooks/api/v1/endpoints/{id}/filters": {
+      "put": {
+        "operationId": "put_filters_webhooks_api_v1_endpoints__id__filters_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Filters"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndpointView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Filters"
       }
     },
     "/webhooks/api/v1/endpoints/{id}/rotate": {
@@ -1252,7 +1441,7 @@
     },
     "/webhooks/api/v1/templates/preview": {
       "post": {
-        "description": "Render a template against an example payload; nothing is stored.",
+        "description": "Render a template and/or evaluate filters against an example; nothing is stored.",
         "operationId": "preview_template_webhooks_api_v1_templates_preview_post",
         "requestBody": {
           "content": {

@@ -202,7 +202,7 @@ AUTH="Authorization: Bearer $TOKEN"
 
 ### `GET /webhooks/api/v1/endpoints`
 
-Lists endpoints: 200, an array of `{id, suffix, url, type, preset_id, prompt_template, username, created_at, credentials_rotated_at}`. Never carries a password.
+Lists endpoints: 200, an array of `{id, suffix, url, type, preset_id, prompt_template, filters, username, created_at, credentials_rotated_at}`. Never carries a password.
 
 ```
 curl -H "$AUTH" $API/endpoints
@@ -210,12 +210,22 @@ curl -H "$AUTH" $API/endpoints
 
 ### `POST /webhooks/api/v1/endpoints`
 
-Body `{type, preset_id, suffix?, username?, password?, prompt_template?}`; a missing suffix, username or password is generated (password at least `WEBHOOK_MIN_PASSWORD_LENGTH` characters when given). Response 201: the endpoint view plus `password`, shown only here (`Cache-Control: no-store`). Errors: 422 `invalid_request` (bad type, suffix, credentials or template), 422 `unknown_preset` (also a `preset_id` that is not a UUID), 409 `suffix_taken`, 502 `orchestrator_auth`, 503 `orchestrator_unavailable`.
+Body `{type, preset_id, suffix?, username?, password?, prompt_template?, filters?}` where `filters` is `{allow: [rule], deny: [rule]}` and a rule is `{field, match: "equals" | "regex" (default equals), values: [string]}` (see Filters; the view always carries `filters`, empty lists when unset); a missing suffix, username or password is generated (password at least `WEBHOOK_MIN_PASSWORD_LENGTH` characters when given). Response 201: the endpoint view plus `password`, shown only here (`Cache-Control: no-store`). Errors: 422 `invalid_request` (bad type, suffix, credentials, template or filter rule; the message names the rule path such as `filters.deny[0]`), 422 `unknown_preset` (also a `preset_id` that is not a UUID), 409 `suffix_taken`, 502 `orchestrator_auth`, 503 `orchestrator_unavailable`.
 
 ```
 curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"type":"github-pr","preset_id":"<preset id>","prompt_template":"Review {{ repo }}#{{ number }}: {{ title }}"}' \
   $API/endpoints
+```
+
+### `PUT /webhooks/api/v1/endpoints/{id}/filters`
+
+Replaces the endpoint's filters. Body `{allow?: [rule], deny?: [rule]}` (a missing list is empty). Response 200: the endpoint view. Errors: 404 `not_found`, 422 `invalid_request` (the message names the rule path, for example a field that does not apply to the endpoint type).
+
+```
+curl -X PUT -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"deny":[{"field":"labels","values":["env=staging"]}]}' \
+  $API/endpoints/3/filters
 ```
 
 ### `POST /webhooks/api/v1/endpoints/{id}/rotate`
@@ -252,7 +262,7 @@ curl -H "$AUTH" $API/events/42
 
 ### `POST /webhooks/api/v1/templates/preview`
 
-Renders a template against an example JSON payload and returns the prompt; nothing is stored. Body `{template, type, example}`: `type` is an endpoint type and `example` the provider payload of that type (it is normalized exactly as at ingest, so the context variables are the real ones; `payload` is `example`). Response 200 `{prompt}`. Errors: 422 `invalid_request` when `type` is unknown, the example is not a payload of that type, or the template does not compile or render (the message names the cause).
+Renders a template and/or evaluates filters against an example JSON payload; nothing is stored. Body `{template?, type, example, filters?}`, at least one of `template` and `filters` required: `type` is an endpoint type and `example` the provider payload of that type (it is normalized exactly as at ingest, so the context variables are the real ones; `payload` is `example`). Response 200 `{prompt, filters}`: `prompt` is the rendered text, or null without a `template`; `filters` is `{passed, reason}` (`reason` such as `filter_denied: author`, null when it passes), or null without `filters`. Errors: 422 `invalid_request` when neither is given (`template or filters: required`), a filter rule is invalid for `type` (the message names the rule path), `type` is unknown, the example is not a payload of that type, or the template does not compile or render (the message names the cause).
 
 ```
 curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
@@ -262,7 +272,7 @@ curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
 
 ### `GET /webhooks/api/v1/meta`
 
-Response 200: `{public_base_url, ingest_path_prefix, types, limits}` where `limits` has `max_in_progress`, `max_in_progress_per_endpoint`, `max_queue`, `max_body_bytes`, `run_timeout_seconds` and `auth_failures_per_minute`.
+Response 200: `{public_base_url, ingest_path_prefix, types, filter_fields, limits}` where `filter_fields` maps each endpoint type to the fields a filter rule may use and `limits` has `max_in_progress`, `max_in_progress_per_endpoint`, `max_queue`, `max_body_bytes`, `run_timeout_seconds` and `auth_failures_per_minute`.
 
 ```
 curl -H "$AUTH" $API/meta

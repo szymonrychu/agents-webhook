@@ -119,7 +119,7 @@ def test_template_preview_with_from_json(stack: Stack):
         json={"template": TEMPLATE, "type": "github-pr", "example": json_body_pr()},
     )
     assert r.status_code == 200, r.text
-    assert r.json() == {"prompt": "Service billing: Fix it"}
+    assert r.json() == {"prompt": "Service billing: Fix it", "filters": None}
 
     bad = stack.http.post(
         f"{stack.api}/templates/preview",
