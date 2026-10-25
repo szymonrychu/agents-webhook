@@ -33,7 +33,8 @@ _CLAIM_LOCK = 0x77685F636C61696D  # "wh_claim"
 
 _COLUMNS = (
     "id, seq, priority, received_at, updated_at, endpoint_id, endpoint_suffix, type, source, "
-    "kind, action, repo, number, title, body, comment_body, url, author, actor, labels, payload, delivery_id, "
+    "kind, action, repo, number, title, body, comment_body, url, author, actor, labels, payload, "
+    "delivery_id, "
     "dedup_key, status, reason, preset_id, prompt_template, update_of, duplicate_of, deliveries, "
     "cluster_id, cluster_slug, message_id, started_at, finished_at"
 )
