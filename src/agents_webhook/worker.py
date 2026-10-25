@@ -6,26 +6,27 @@ sooner on NOTIFY `webhook_events`. A tick:
 1. reads the preset of every endpoint with `new` rows, once per endpoint (D17); the rows of an
    endpoint whose preset the orchestrator could not serve are not claimed this tick;
 2. resumes every in-progress row without a message (crash recovery; `runs.dispatch` creates no
-   second cluster and posts no second prompt, `runs.deliver` posts no second update);
+   second session and posts no second prompt, `runs.deliver` posts no second update);
 3. tracks every in-progress row with a message (`runs.track`: turn completed -> handled,
    message or turn failed, or older than `run_timeout_seconds` -> failed; an update row through
    `runs.track_delivery`), which frees the slots the claims below use;
 4. claims `new` rows within the caps until none is claimable; each goes through `route` first
-   and, when it answers False, is dispatched as a new cluster `wh-<id>`.
+   and, when it answers False, is dispatched as a new session `wh-<id>`.
 
 Agent reuse (design D16, D17): when the endpoint's preset has `reuse_running_agent`, a claimed
-row whose key has an earlier run is marked an update of that run and, while its cluster is
-running (exists, desired `active`, first turn completed or not), delivered there as an update
-message; it bypasses the caps and is handled once the message is `sent`. A cluster that is gone
+row whose key has an earlier run is marked an update of that run and, while the run's session
+is running (exists, desired `active`, first turn completed or not), delivered there as an update
+message; it bypasses the caps and is handled once the message is `sent`. A session that is gone
 at check time, refuses the post, or cancels or fails the message before `sent` makes the row
-fall back once: a first dispatch as `wh-<id>` when the caps allow, else back to `new` keeping
-its FIFO place; a 4xx on the cluster check or the post falls back the same way. A fallback
-row that then fails records `reuse_fallback` in its reason. An update row still without a
-message after `run_timeout_seconds` (the orchestrator stayed unavailable) fails `timeout`.
+fall back once to a new session `wh-<id>` when the caps allow, else back to `new` keeping its
+FIFO place; a 4xx on the session check or the post falls back the same way. A session that
+disappears under a first dispatch fails the row `session_not_found`. A fallback row that then
+fails records `reuse_fallback` in its reason. An update row still without a message after
+`run_timeout_seconds` (the orchestrator stayed unavailable) fails `timeout`.
 
 An unavailable orchestrator leaves the row as it is for the next tick (logged once per row per
 minute); a 4xx on create or post fails the row with the error code. The service never deletes
-clusters. A lost lock raises `LostLock` out of `run_worker` (the process exits non-zero and the
+sessions. A lost lock raises `LostLock` out of `run_worker` (the process exits non-zero and the
 Deployment restarts it).
 """
 
@@ -75,36 +76,29 @@ def run_ref(event: events.Event) -> runs.RunRef:
         id=event.id,
         slug=event.session_slug or f"wh-{event.id}",
         preset_id=event.preset_id or "",
-        cluster_id=event.session_id,
+        session_id=event.session_id,
         message_id=event.message_id,
         started_at=event.started_at,
     )
 
 
-class _RunStore:
-    """The `runs.RunStore` agents-common v0.2.0 drives over `EventStore`: the id it records
-    through `set_cluster` is the row's session."""
+class _FallbackStore:
+    """The run store of a reuse-fallback row: `EventStore`, with a failure reason prefixed
+    `reuse_fallback`."""
 
     def __init__(self, store: events.EventStore) -> None:
         self._store = store
 
-    async def set_cluster(self, run_id: runs.RunId, cluster_id: str) -> None:
-        await self._store.set_session(run_id, cluster_id)
+    async def set_session(self, run_id: runs.RunId, session_id: str) -> None:
+        await self._store.set_session(run_id, session_id)
 
     async def set_message(self, run_id: runs.RunId, message_id: str) -> None:
         await self._store.set_message(run_id, message_id)
 
     async def finish(self, run_id: runs.RunId, status: runs.RunStatus, reason: str | None) -> bool:
-        return await self._store.finish(run_id, status, reason)
-
-
-class _FallbackStore(_RunStore):
-    """The run store of a reuse-fallback row: a failure reason is prefixed `reuse_fallback`."""
-
-    async def finish(self, run_id: runs.RunId, status: runs.RunStatus, reason: str | None) -> bool:
         if status == "failed":
             reason = f"{REUSE_FALLBACK}: {reason}" if reason else REUSE_FALLBACK
-        return await super().finish(run_id, status, reason)
+        return await self._store.finish(run_id, status, reason)
 
 
 class Worker:
@@ -122,7 +116,7 @@ class Worker:
         self.pool = pool
         self.client = client
         self.store = events.EventStore(pool)
-        self.run_store = _RunStore(self.store)
+        self.run_store: runs.RunStore = self.store
         self._fallback_store = _FallbackStore(self.store)
         self._clock = clock
         self._unavailable_logged: dict[tuple[str, int], float] = {}
@@ -187,7 +181,7 @@ class Worker:
         return True
 
     async def dispatch(self, event: events.Event) -> None:
-        """Create the row's cluster and post its rendered prompt, each at most once."""
+        """Create the row's session and post its rendered prompt, each at most once."""
         store = self._store_of(event)
         if not event.preset_id:
             await store.finish(event.id, "failed", "preset_not_found")
@@ -214,11 +208,11 @@ class Worker:
     # --- reuse ------------------------------------------------------------------------------
 
     async def _deliver(self, event: events.Event, parent: events.Event) -> None:
-        """Deliver update row `event` to `parent`'s cluster while it runs, else fall back."""
+        """Deliver update row `event` to `parent`'s session while it runs, else fall back."""
         assert parent.session_id is not None
         try:
-            if await runs.running_cluster(self.client, parent.session_id) is None:
-                log.info("event %s: cluster of event %s is not running", event.id, parent.id)
+            if await runs.running_session(self.client, parent.session_id) is None:
+                log.info("event %s: session of event %s is not running", event.id, parent.id)
                 await self._fallback(event)
                 return
             if event.session_id is None:
@@ -248,7 +242,7 @@ class Worker:
             return
         self._unavailable_logged.pop(("event", event.id), None)
         if delivered is None:
-            log.info("event %s: cluster of event %s refused the update", event.id, parent.id)
+            log.info("event %s: session of event %s refused the update", event.id, parent.id)
             await self._fallback(event)
 
     async def _track_delivery(self, event: events.Event) -> None:

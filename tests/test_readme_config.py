@@ -28,7 +28,7 @@ REASONS = (
     "queue_full",
     "endpoint_removed",
     "preset_not_found",
-    "cluster_not_found",
+    "session_not_found",
     "template_error",
     "timeout",
     "turn_failed",
@@ -98,3 +98,8 @@ def test_filters_section_lists_every_field(endpoint_type, field):
 def test_retired_author_allowlist_not_documented():
     assert "WEBHOOK_ALLOWED_AUTHORS" not in README
     assert "author_not_allowed" not in README
+
+
+def test_readme_says_session_for_the_unit():
+    """The orchestrator's unit is a session; `in-cluster` (Kubernetes) is the only cluster."""
+    assert re.findall(r"\w*clusters?\b", README.replace("in-cluster", "")) == []

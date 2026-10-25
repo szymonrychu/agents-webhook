@@ -4,8 +4,8 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "agents-common"
-version = "0.2.0"
-source = { git = "https://github.com/szymonrychu/agents-common?rev=v0.2.0#17b49d4210113e0448c7dba96aea4d306b29273f" }
+version = "0.3.0"
+source = { git = "https://github.com/szymonrychu/agents-common?rev=v0.3.0#6dd79c826d6b7afda1683781e4c5f5228c60691d" }
 dependencies = [
     { name = "httpx" },
     { name = "psycopg", extra = ["binary", "pool"] },
@@ -42,7 +42,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agents-common", git = "https://github.com/szymonrychu/agents-common?rev=v0.2.0" },
+    { name = "agents-common", git = "https://github.com/szymonrychu/agents-common?rev=v0.3.0" },
     { name = "fastapi" },
     { name = "google-re2", specifier = ">=1.1.20251105" },
     { name = "jinja2", specifier = ">=3.1.6" },
@@ -51,7 +51,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "agents-common", extras = ["testing"], git = "https://github.com/szymonrychu/agents-common?rev=v0.2.0" },
+    { name = "agents-common", extras = ["testing"], git = "https://github.com/szymonrychu/agents-common?rev=v0.3.0" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },

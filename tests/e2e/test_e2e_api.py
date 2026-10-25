@@ -1,6 +1,6 @@
 """Headless parity (design D14): every capability through HTTP to the real ingest and api
 processes; the orchestrator is the FakeOrchestrator, the only thing the tests reach around HTTP
-to drive (turn completion, discarded clusters)."""
+to drive (turn completion, discarded sessions)."""
 
 import copy
 import time
@@ -77,7 +77,7 @@ def test_create_endpoint_receive_event_and_complete(stack: Stack):
     row = stack.wait_status(accepted["id"], "in-progress")
     assert row["session_slug"] == f"wh-{accepted['id']}"
     assert row["endpoint_suffix"] == created["suffix"]
-    stack.cluster(row["session_slug"])
+    stack.session(row["session_slug"])
 
     stack.fake.complete_turn(int(row["message_id"]), "done")
     assert stack.wait_status(accepted["id"], "handled")["finished_at"] is not None
@@ -121,7 +121,7 @@ def test_deny_filter_ignores_and_others_run(stack: Stack):
 
     ran = finish(stack, accept(stack, ep, PR[0], titled("Ship it"))["id"])
     assert ran["status"] == "handled"
-    assert len([c for c in stack.fake.clusters.values() if c["slug"] == ran["session_slug"]]) == 1
+    assert len([c for c in stack.fake.sessions.values() if c["slug"] == ran["session_slug"]]) == 1
 
 
 def test_allow_filter_ignores_stranger(stack: Stack):
@@ -212,7 +212,7 @@ def test_template_preview_with_from_json(stack: Stack):
     assert broken.status_code == 422  # the example body is not JSON: from_json refuses it
 
 
-def test_endpoint_template_prompt_is_the_first_cluster_message(stack: Stack):
+def test_endpoint_template_prompt_is_the_first_session_message(stack: Stack):
     bad = stack.http.post(
         f"{stack.api}/endpoints",
         json={"type": "github-pr", "preset_id": stack.preset_id, "prompt_template": "{% nope %}"},
@@ -224,7 +224,7 @@ def test_endpoint_template_prompt_is_the_first_cluster_message(stack: Stack):
     row = stack.wait_status(
         accept(stack, ep, p.gh_headers("pull_request"), json_body_pr())["id"], "in-progress"
     )
-    messages = stack.messages(stack.cluster(row["session_slug"])["id"])
+    messages = stack.messages(stack.session(row["session_slug"])["id"])
     assert len(messages) == 1
     assert messages[0]["text"].startswith("Service billing: Fix it")
     assert str(row["id"]) in messages[0]["text"]  # the run marker follows the prompt
@@ -264,29 +264,29 @@ def comment(stack: Stack, ep: dict, who: str = "bob") -> int:
     )["id"]
 
 
-def test_reuse_on_delivers_to_the_running_cluster_then_starts_a_new_one(stack: Stack):
+def test_reuse_on_delivers_to_the_running_session_then_starts_a_new_one(stack: Stack):
     ep = stack.create_endpoint("github-pr", preset_id=stack.preset(reuse_running_agent=True))
     first = stack.wait_status(accept(stack, ep, *PR)["id"], "in-progress")
-    cluster = stack.cluster(first["session_slug"])
+    session = stack.session(first["session_slug"])
 
     second = stack.wait_status(comment(stack, ep), "in-progress")
     assert second["update_of"] == first["id"]
-    assert second["session_id"] == cluster["id"]
-    assert len(stack.messages(cluster["id"])) == 2
-    assert len([c for c in stack.fake.clusters.values() if c["preset_id"] == ep["preset_id"]]) == 1
+    assert second["session_id"] == session["id"]
+    assert len(stack.messages(session["id"])) == 2
+    assert len([c for c in stack.fake.sessions.values() if c["preset_id"] == ep["preset_id"]]) == 1
     stack.fake.mark_sent(int(second["message_id"]))
     stack.wait_status(second["id"], "handled")
     stack.fake.complete_turn(int(first["message_id"]), "done")
     stack.wait_status(first["id"], "handled")
 
-    stack.fake.discard_cluster(cluster["id"])
+    stack.fake.discard_session(session["id"])
     third = stack.wait_status(comment(stack, ep), "in-progress")
     assert third["session_slug"] == f"wh-{third['id']}"
-    assert third["session_id"] != cluster["id"]
+    assert third["session_id"] != session["id"]
     assert len(stack.messages(third["session_id"])) == 1
 
 
-def test_reuse_off_starts_its_own_cluster(stack: Stack):
+def test_reuse_off_starts_its_own_session(stack: Stack):
     ep = stack.create_endpoint("github-pr", preset_id=stack.preset(reuse_running_agent=False))
     first = finish(stack, accept(stack, ep, *PR)["id"])
     second = stack.wait_status(comment(stack, ep), "in-progress")
@@ -337,7 +337,7 @@ def test_in_progress_cap_holds_the_second_event_until_the_first_is_handled(make_
     second = accept(stack, b, *PR)["id"]
     time.sleep(1.5)  # several worker ticks: the cap keeps it queued
     assert stack.event(second)["status"] == "new"
-    assert len([c for c in stack.fake.clusters.values()]) == 1
+    assert len([c for c in stack.fake.sessions.values()]) == 1
 
     stack.fake.complete_turn(int(first["message_id"]), "done")
     stack.wait_status(first["id"], "handled")
