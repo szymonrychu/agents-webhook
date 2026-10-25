@@ -77,7 +77,15 @@ def build_router(
             raise ApiError(
                 422, "unknown_preset", f"preset_id: unknown preset {body.preset_id}"
             ) from exc
-        except (OrchestratorError, OrchestratorUnavailable) as exc:
+        except OrchestratorError as exc:
+            if exc.status in (401, 403):
+                log.error("api: orchestrator refused the service token (%s)", exc.status)
+                raise ApiError(
+                    502, "orchestrator_auth", "orchestrator rejected the service credentials"
+                ) from exc
+            log.warning("api: orchestrator unavailable (%s)", type(exc).__name__)
+            raise ApiError(503, "orchestrator_unavailable", "orchestrator unavailable") from exc
+        except OrchestratorUnavailable as exc:
             log.warning("api: orchestrator unavailable (%s)", type(exc).__name__)
             raise ApiError(503, "orchestrator_unavailable", "orchestrator unavailable") from exc
         data = endpoints.EndpointIn(**body.model_dump())
@@ -162,6 +170,7 @@ def build_router(
                 payload,
                 event,
                 timeout=settings.template_timeout_seconds,
+                memory_mb=settings.template_memory_mb,
             )
         except (ValueError, prompt.TemplateError) as exc:
             raise _invalid(f"template: {exc}") from exc

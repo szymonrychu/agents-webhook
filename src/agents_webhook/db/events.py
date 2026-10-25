@@ -37,7 +37,7 @@ _COLUMNS = (
     "kind, action, repo, number, title, body, comment_body, url, author, actor, labels, payload, "
     "delivery_id, "
     "dedup_key, status, reason, preset_id, prompt_template, update_of, duplicate_of, deliveries, "
-    "cluster_id, cluster_slug, message_id, started_at, finished_at"
+    "cluster_id, cluster_slug, message_id, started_at, finished_at, draft, changed"
 )
 # Ignored rows keep at most this much of a payload; only `new` rows keep it whole.
 IGNORED_PAYLOAD_CAP = 4096
@@ -47,7 +47,19 @@ _CAP_IGNORED_SQL = (
     "WHERE id = %(id)s AND status = 'ignored' AND octet_length(payload::text) > %(cap)s"
 )
 # Columns latest-wins copies from a newer delivery of the same key onto the `new` row.
-_LATEST = ("action", "title", "body", "comment_body", "url", "author", "actor", "labels", "payload")
+_LATEST = (
+    "action",
+    "title",
+    "body",
+    "comment_body",
+    "url",
+    "author",
+    "actor",
+    "labels",
+    "draft",
+    "changed",
+    "payload",
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +99,8 @@ class Event:
     message_id: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    draft: bool
+    changed: Any
 
 
 @dataclass(frozen=True)
@@ -128,6 +142,8 @@ def _values(endpoint: Endpoint, event: NormalizedEvent, payload: Any) -> dict[st
         "author": event.author,
         "actor": event.actor,
         "labels": Jsonb(event.labels),
+        "draft": event.draft,
+        "changed": Jsonb(list(event.changed)),
         "payload": Jsonb(payload),
         "delivery_id": event.delivery_id,
         "dedup_key": event.dedup_key,
@@ -474,6 +490,8 @@ def to_normalized(event: Event) -> NormalizedEvent:
         delivery_id=event.delivery_id,
         dedup_key=event.dedup_key,
         priority=event.priority,
+        draft=event.draft,
+        changed=tuple(event.changed),
     )
 
 

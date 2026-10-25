@@ -659,3 +659,27 @@ async def test_routes_concurrent_deliveries_all_recorded(client, conn, make_hook
     assert sorted(r.status_code for r in results) == [202] * 4
     statuses = sorted(r.json()["status"] for r in results)
     assert statuses == ["ignored", "ignored", "ignored", "new"]
+
+
+async def test_request_timeout_body_shape():
+    from agents_webhook import cli
+
+    async def app(scope, receive, send):
+        await receive()
+
+    async def stall():
+        await asyncio.sleep(5)
+
+    async def receive():
+        return await stall()
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message):
+        sent.append(message)
+
+    await cli.BodyReadTimeout(app, 0.05)({"type": "http"}, receive, send)
+    assert sent[0]["status"] == 408
+    assert json.loads(sent[1]["body"]) == {
+        "error": {"code": "request_timeout", "message": "request timeout"}
+    }

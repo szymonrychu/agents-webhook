@@ -1,7 +1,10 @@
 """The UI API: endpoints create/list/rotate/delete, events, templates preview, meta."""
 
+import hashlib
 import json
+import re
 import secrets
+import uuid
 from typing import Any
 
 import httpx
@@ -197,9 +200,65 @@ async def test_invalid_orchestrator_down_503(settings, pool, fake):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://api"
         ) as c:
-            resp = await create(c, "whatever")
+            resp = await create(c, str(uuid.uuid4()))
     assert resp.status_code == 503
     assert code(resp) == "orchestrator_unavailable"
+
+
+class ServicePort(httpx.AsyncBaseTransport):
+    """The fake behind the real service port's gate (agent_orchestrator.api.service_auth).
+
+    A wrong bearer token gets 401 `unauthorized`; a preset path whose id is not a UUID is not
+    in the allowlist and gets 403 `forbidden`.
+    """
+
+    UUID = re.compile(r"/api/v1/presets/[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
+
+    def __init__(self, fake: FakeOrchestrator, token_sha256: str):
+        self._inner = httpx.ASGITransport(app=fake.app)
+        self._sha = token_sha256
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        _, _, token = request.headers.get("authorization", "").partition(" ")
+        if hashlib.sha256(token.encode()).hexdigest() != self._sha:
+            return _gate(401, "unauthorized", "a valid service token is required")
+        path = request.url.path
+        if path.startswith("/api/v1/presets/") and not self.UUID.fullmatch(path):
+            return _gate(403, "forbidden", "route is not served on the service port")
+        return await self._inner.handle_async_request(request)
+
+
+def _gate(status: int, code: str, message: str) -> httpx.Response:
+    return httpx.Response(status, json={"error": {"code": code, "message": message}})
+
+
+async def test_preset_id_validation_and_orchestrator_auth_errors(settings, pool, fake, preset):
+    sha = hashlib.sha256(fake.token.encode()).hexdigest()
+
+    async def post(token: str, preset_id: str) -> httpx.Response:
+        transport = ServicePort(fake, sha)
+        async with OrchestratorClient("http://orch", token, transport=transport) as orch:
+            app = create_api_app(settings, pool, orch)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://api"
+            ) as c:
+                return await create(c, preset_id)
+
+    for bad in ("default", "not-a-uuid", "../presets", ""):
+        resp = await post(fake.token, bad)
+        assert resp.status_code == 422, bad
+        assert code(resp) == "unknown_preset", bad
+        assert "preset_id" in resp.json()["error"]["message"]
+
+    resp = await post(fake.token, str(uuid.uuid4()))
+    assert resp.status_code == 422 and code(resp) == "unknown_preset"
+
+    resp = await post("revoked-token", preset)
+    assert resp.status_code == 502
+    assert code(resp) == "orchestrator_auth"
+
+    resp = await post(fake.token, preset)
+    assert resp.status_code == 201
 
 
 # --- rotate / delete ----------------------------------------------------------------------

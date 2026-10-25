@@ -3,7 +3,7 @@
 import ipaddress
 
 from agents_common.settings import BaseServiceSettings, CsvList
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
 
 
@@ -26,21 +26,28 @@ class WebhookSettings(BaseServiceSettings):
     trusted_proxies: CsvList = []
     min_password_length: int = Field(16, ge=1)
     template_timeout_seconds: float = Field(2.0, gt=0)
+    template_memory_mb: int = Field(256, ge=32)
+    api_allowed_cidrs: CsvList = ["127.0.0.1/32"]
 
     @field_validator("public_base_url")
     @classmethod
     def _strip_slash(cls, value: str) -> str:
         return value.rstrip("/")
 
-    @field_validator("trusted_proxies")
+    @field_validator("trusted_proxies", "api_allowed_cidrs")
     @classmethod
-    def _cidrs(cls, value: list[str]) -> list[str]:
+    def _cidrs(cls, value: list[str], info: ValidationInfo) -> list[str]:
         for item in value:
             try:
                 ipaddress.ip_network(item, strict=False)
             except ValueError:
-                raise ValueError(f"WEBHOOK_TRUSTED_PROXIES::not a CIDR: {item!r}") from None
+                raise ValueError(
+                    f"WEBHOOK_{str(info.field_name).upper()}::not a CIDR: {item!r}"
+                ) from None
         return value
+
+    def api_networks(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        return [ipaddress.ip_network(c, strict=False) for c in self.api_allowed_cidrs]
 
 
 class LocalSettings(WebhookSettings):

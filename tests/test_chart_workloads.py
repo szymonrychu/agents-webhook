@@ -127,7 +127,7 @@ def test_secrets_existing_secrets_are_referenced():
     docs = render(values)
     assert not [d for d in docs if d["kind"] == "Secret"]
     api = main_container(deployments(docs)["api"])
-    refs = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in api["env"]}
+    refs = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in api["env"] if "valueFrom" in e}
     assert refs["WEBHOOK_DATABASE_URL"] == {"name": "pg", "key": "dsn"}
     assert refs["WEBHOOK_ORCHESTRATOR_TOKEN"] == {"name": "tk", "key": "t"}
 
@@ -141,7 +141,7 @@ def test_secrets_not_in_configmap_and_no_source_secrets():
     stored = {k: v for d in docs if d["kind"] == "Secret" for k, v in d["stringData"].items()}
     assert set(stored) == {"uri", "token"}
     everything = yaml.safe_dump_all(docs)
-    assert "sources" not in everything.lower()
+    assert "sources" not in everything.lower().replace("resources", "")
     for name in env_names_all(docs):
         assert not (name.endswith(("_SECRET", "_TOKEN")) and name != "WEBHOOK_ORCHESTRATOR_TOKEN")
 
@@ -227,3 +227,37 @@ def test_probes_use_numeric_port():
         c = main_container(deps[name])
         assert c["livenessProbe"]["httpGet"]["port"] == 8000
         assert c["readinessProbe"]["httpGet"]["port"] == 8000
+
+
+def env_values(container: dict) -> dict[str, str]:
+    return {e["name"]: e["value"] for e in container.get("env", []) if "value" in e}
+
+
+def test_api_allowed_cidrs_rendered():
+    deps = deployments(render())
+    assert env_values(main_container(deps["api"]))["WEBHOOK_API_ALLOWED_CIDRS"] == "127.0.0.1/32"
+    for name in ("ingest", "worker"):
+        assert "WEBHOOK_API_ALLOWED_CIDRS" not in env_names(main_container(deps[name]))
+    for dep in deps.values():
+        init = dep["spec"]["template"]["spec"]["initContainers"][0]
+        assert "WEBHOOK_API_ALLOWED_CIDRS" not in env_names(init)
+    cm = next(d for d in render() if d["kind"] == "ConfigMap")
+    assert "WEBHOOK_API_ALLOWED_CIDRS" not in cm["data"]
+    custom = deployments(render({"api": {"allowedCidrs": ["127.0.0.1/32", "10.0.0.0/8"]}}))
+    assert (
+        env_values(main_container(custom["api"]))["WEBHOOK_API_ALLOWED_CIDRS"]
+        == "127.0.0.1/32,10.0.0.0/8"
+    )
+
+
+def test_default_resources_and_template_memory():
+    docs = render()
+    for name, dep in deployments(docs).items():
+        res = main_container(dep)["resources"]
+        assert res["requests"]["memory"], name
+        assert res["limits"]["memory"], name
+    data = next(d for d in docs if d["kind"] == "ConfigMap")["data"]
+    assert data["WEBHOOK_TEMPLATE_MEMORY_MB"] == "256"
+    docs = render({"templateMemoryMb": 128})
+    data = next(d for d in docs if d["kind"] == "ConfigMap")["data"]
+    assert data["WEBHOOK_TEMPLATE_MEMORY_MB"] == "128"

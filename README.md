@@ -32,9 +32,11 @@ Every setting is an environment variable. The first block is read by all subcomm
 | `WEBHOOK_POLL_SECONDS` | 5 | worker tick when no NOTIFY arrives |
 | `WEBHOOK_EVENTS_RETENTION_DAYS` | 30 | the worker deletes handled, ignored and failed events idle longer than this, hourly, in batches of 1000 |
 | `WEBHOOK_AUTH_FAILURES_PER_MINUTE` | 10 | failed authentications per client per minute before 429 |
+| `WEBHOOK_API_ALLOWED_CIDRS` | `127.0.0.1/32` | comma-separated CIDRs the api accepts as direct peer address (403 otherwise, `/healthz` and `/readyz` excepted; `X-Forwarded-For` is never read). The default admits only the oauth2-proxy sidecar |
 | `WEBHOOK_TRUSTED_PROXIES` | empty | comma-separated CIDRs whose `X-Forwarded-For` is trusted |
 | `WEBHOOK_MIN_PASSWORD_LENGTH` | 16 | shortest accepted caller-chosen password |
 | `WEBHOOK_TEMPLATE_TIMEOUT_SECONDS` | 2.0 | per-render time limit for prompt templates |
+| `WEBHOOK_TEMPLATE_MEMORY_MB` | 256 | memory a template render child may allocate beyond its baseline (`RLIMIT_AS`, enforced on Linux); over it the event fails `template_error`. Chart value `templateMemoryMb` |
 | `WEBHOOK_DATABASE_URL` | required | Postgres URL |
 | `WEBHOOK_HTTP_HOST` | `0.0.0.0` | listen address |
 | `WEBHOOK_HTTP_PORT` | 8000 | listen port |
@@ -107,7 +109,7 @@ A 4xx from the orchestrator when creating a cluster or posting fails the event w
 - Endpoint passwords are stored only as scrypt hashes; the plaintext is shown once at creation or rotation (`Cache-Control: no-store`).
 - Credentials are compared in constant time, also for suffixes that do not exist. Unknown suffix and wrong credentials give the same 401 with `WWW-Authenticate: Basic`.
 - Failed authentications are limited per client (`WEBHOOK_AUTH_FAILURES_PER_MINUTE`, then 429 with `Retry-After`). The client is the peer address; `X-Forwarded-For` is honoured only from `WEBHOOK_TRUSTED_PROXIES`.
-- Bodies over `WEBHOOK_MAX_BODY_BYTES` (5 MiB) get 413, after authentication; stalled body reads are cut off with 408.
+- Bodies over `WEBHOOK_MAX_BODY_BYTES` (5 MiB) get 413, after authentication; stalled body reads are cut off with 408 `{"error": {"code": "request_timeout", ...}}`.
 - Prompt framing: the default prompt wraps the event in an escaped `<event>` data block so untrusted text is data, and custom templates run in a sandbox (see Prompt templates).
 - `api` and `worker` call the orchestrator with a service token (`WEBHOOK_ORCHESTRATOR_TOKEN` or `_FILE`); it is never logged or returned.
 
@@ -126,7 +128,7 @@ Invalid settings exit with code 78, naming every bad variable.
 
 ## Helm chart
 
-`chart/agents-webhook` deploys the `ingest` (2 replicas), `api` and `worker` Deployments from one image, the settings ConfigMap, a Secret and a Service. Required values: `image.tag`, `orchestrator.url` with `orchestrator.token` or `orchestrator.tokenSecret`, and exactly one of `postgres.url` and `postgres.existingSecret`. `limits.*` render the limit variables above; `publicBaseUrl` and `trustedProxies` render `WEBHOOK_PUBLIC_BASE_URL` and `WEBHOOK_TRUSTED_PROXIES`; `env` adds extra `WEBHOOK_*` settings. With `ingress.enabled` there are two Ingresses on one host: `/webhooks/api` (put SSO annotations in `ingress.annotations`) and `/webhook` (public; `ingress.ingestAnnotations`, body limit `ingress.proxyBodySize`, keep it at or above `limits.maxBodyBytes`). Each pod runs `migrate` as an init container.
+`chart/agents-webhook` deploys the `ingest` (2 replicas), `api` and `worker` Deployments from one image, the settings ConfigMap, a Secret and a Service. Required values: `image.tag`, `orchestrator.url` with `orchestrator.token` or `orchestrator.tokenSecret`, and exactly one of `postgres.url` and `postgres.existingSecret`. `limits.*` render the limit variables above; `publicBaseUrl` and `trustedProxies` render `WEBHOOK_PUBLIC_BASE_URL` and `WEBHOOK_TRUSTED_PROXIES`; `api.allowedCidrs` renders `WEBHOOK_API_ALLOWED_CIDRS` on the api pod only (default `127.0.0.1/32`, so the SSO sidecar is the only caller; the sidecar's `http-insecure` Service port is otherwise open to every in-cluster pod); `env` adds extra `WEBHOOK_*` settings. With `ingress.enabled` there are two Ingresses on one host: `/webhooks/api` (put SSO annotations in `ingress.annotations`) and `/webhook` (public; `ingress.ingestAnnotations`, body limit `ingress.proxyBodySize`, keep it at or above `limits.maxBodyBytes`). Each pod runs `migrate` as an init container.
 
 ## Development
 
@@ -163,9 +165,9 @@ curl -u "$USERNAME:$PASSWORD" -H 'Content-Type: application/json' \
 
 An endpoint's `prompt_template` is a Jinja2 template for the initial prompt. Without one the default prompt is used: a preamble plus an escaped `<event>` data block.
 
-- Templates run in a sandboxed Jinja2 environment (`ImmutableSandboxedEnvironment`): no loader (no `include` or `import` of files), autoescape off, `StrictUndefined` (an undefined variable is an error, not an empty string), output capped at 64 KiB, template source at most 16 KiB, `range` limited to 10000 items, and repetition, product and power results bounded. Each render runs in a child process killed after `WEBHOOK_TEMPLATE_TIMEOUT_SECONDS` (default 2).
+- Templates run in a sandboxed Jinja2 environment (`ImmutableSandboxedEnvironment`): no loader (no `include` or `import` of files), autoescape off, `StrictUndefined` (an undefined variable is an error, not an empty string), output capped at 64 KiB, template source at most 16 KiB, `range` limited to 10000 items, and repetition, product and power results bounded. Each render runs in a child process killed after `WEBHOOK_TEMPLATE_TIMEOUT_SECONDS` (default 2) and capped at `WEBHOOK_TEMPLATE_MEMORY_MB` (default 256) of address space, so filters such as `center(10**9)` fail with `template_error` instead of exhausting the pod. The chart sets default `resources` for ingest (limit 256Mi), api and worker (limit 640Mi, above the cap plus the pod's own usage); override under `components.<name>.resources`.
 - The `from_json` filter parses a JSON string into a value: `{% set body = payload.message | from_json %}{{ body.field }}`. A value that is not valid JSON is a render error.
-- Context variables for every type: `type`, `source`, `kind`, `action`, `repo`, `number`, `title`, `body`, `comment_body` (null unless the event is a comment), `url`, `author`, `actor`, `labels`, `delivery_id`, `dedup_key`, `priority`, `draft`, `changed`, plus `payload` (the raw request JSON, `{}` when it is not an object) and `event` (the default block, fully escaped). The other variables are raw: escape or frame untrusted text yourself.
+- Context variables for every type: `type`, `source`, `kind`, `action`, `repo`, `number`, `title`, `body`, `comment_body` (null unless the event is a comment), `url`, `author`, `actor`, `labels`, `delivery_id`, `dedup_key`, `priority`, `draft`, `changed` (both stored with the event, so a delivered prompt matches the preview), plus `payload` (the raw request JSON, `{}` when it is not an object) and `event` (the default block, fully escaped). The other variables are raw: escape or frame untrusted text yourself.
 - `labels` is a list of names for `github-issue`, `github-pr`, `gitlab-issue` and `gitlab-mr`, and a mapping (the alert's `commonLabels`) for `grafana-alert`.
 - Creating an endpoint validates the template (syntax, unknown filters and tags): 422 `invalid_request` naming the line.
 - A template that fails at delivery time (undefined variable, bad `from_json` input, timeout, size) fails the event with reason `template_error`.
@@ -173,7 +175,7 @@ An endpoint's `prompt_template` is a Jinja2 template for the initial prompt. Wit
 
 ## API
 
-The UI API lives under `/webhooks/api/v1` in the `api` Deployment behind the SSO sidecar. Errors are `{"error": {"code": "...", "message": "..."}}`; codes: `invalid_request` (422), `unknown_preset` (422), `not_found` (404), `suffix_taken` (409), `orchestrator_unavailable` (503), `unavailable` (503). The committed schema is `openapi.json` (regenerate with `uv run python -m agents_webhook.api.openapi > openapi.json`; a test fails on drift).
+The UI API lives under `/webhooks/api/v1` in the `api` Deployment behind the SSO sidecar. Errors are `{"error": {"code": "...", "message": "..."}}`; codes: `invalid_request` (422), `unknown_preset` (422, also for a preset_id that is not a UUID), `not_found` (404), `suffix_taken` (409), `orchestrator_unavailable` (503), `orchestrator_auth` (502, the orchestrator rejected the service token), `unavailable` (503). The committed schema is `openapi.json` (regenerate with `uv run python -m agents_webhook.api.openapi > openapi.json`; a test fails on drift).
 
 Calling headless: through SSO send a Keycloak bearer token (`Authorization: Bearer $TOKEN`); the injected oauth2-proxy sidecar already accepts it (it sets `OAUTH2_PROXY_SKIP_JWT_BEARER_TOKENS=true` itself), so no per-deployment setting is needed. Without SSO, `kubectl -n agents port-forward deploy/agents-webhook-api 8000:8000` (the api container port) and use `http://localhost:8000`. The examples use:
 
@@ -192,7 +194,7 @@ curl -H "$AUTH" $API/endpoints
 
 ### `POST /webhooks/api/v1/endpoints`
 
-Body `{type, preset_id, suffix?, username?, password?, prompt_template?}`; a missing suffix, username or password is generated (password at least `WEBHOOK_MIN_PASSWORD_LENGTH` characters when given). Response 201: the endpoint view plus `password`, shown only here (`Cache-Control: no-store`). Errors: 422 `invalid_request` (bad type, suffix, credentials or template), 422 `unknown_preset`, 409 `suffix_taken`, 503 `orchestrator_unavailable`.
+Body `{type, preset_id, suffix?, username?, password?, prompt_template?}`; a missing suffix, username or password is generated (password at least `WEBHOOK_MIN_PASSWORD_LENGTH` characters when given). Response 201: the endpoint view plus `password`, shown only here (`Cache-Control: no-store`). Errors: 422 `invalid_request` (bad type, suffix, credentials or template), 422 `unknown_preset` (also a `preset_id` that is not a UUID), 409 `suffix_taken`, 502 `orchestrator_auth`, 503 `orchestrator_unavailable`.
 
 ```
 curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
