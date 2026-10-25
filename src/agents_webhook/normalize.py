@@ -50,6 +50,8 @@ class NormalizedEvent:
     priority: int
     draft: bool = False
     changed: tuple[str, ...] = ()
+    source_branch: str | None = None
+    target_branch: str | None = None
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:
@@ -62,6 +64,18 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
 
 def _login(user: Any) -> str | None:
     return user.get("login") if isinstance(user, dict) else None
+
+
+def _ref(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _ref_of(parent: Any, key: str) -> str | None:
+    return (
+        _ref(parent.get(key, {}).get("ref"))
+        if isinstance(parent, dict) and isinstance(parent.get(key), dict)
+        else None
+    )
 
 
 def _event(
@@ -135,6 +149,8 @@ def _github(
         delivery_id=_header(headers, "X-GitHub-Delivery"),
         draft=bool(item.get("draft")),
         changed=tuple(sorted(changes)) if isinstance(changes, dict) else (),
+        source_branch=_ref_of(item, "head") if name != "issue_comment" else None,
+        target_branch=_ref_of(item, "base") if name != "issue_comment" else None,
     )
 
 
@@ -206,6 +222,8 @@ def _gitlab(
         delivery_id=_header(headers, "X-Gitlab-Event-UUID"),
         draft=bool(item.get("draft") or item.get("work_in_progress")),
         changed=changed,
+        source_branch=_ref(item.get("source_branch")) if is_mr else None,
+        target_branch=_ref(item.get("target_branch")) if is_mr else None,
     )
 
 

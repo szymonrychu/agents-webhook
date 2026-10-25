@@ -344,3 +344,59 @@ def test_gitlab_ready_to_draft_is_ignored():
         p.gl_merge_request("update", changes, draft=True),
     )
     assert _classify(ev) == "action_ignored"
+
+
+def _branches(ev):
+    return ev.source_branch, ev.target_branch
+
+
+def test_github_pr_branches():
+    ev = normalize("github-pr", p.gh_headers("pull_request"), p.gh_pull_request())
+    assert _branches(ev) == ("feature/x", "main")
+
+
+def test_github_branches_per_event():
+    for name, payload in [
+        ("pull_request_review", p.gh_review()),
+        ("pull_request_review_comment", p.gh_review_comment()),
+    ]:
+        ev = normalize("github-pr", p.gh_headers(name), payload)
+        assert _branches(ev) == ("feature/x", "main")
+    ev = normalize("github-pr", p.gh_headers("issue_comment"), p.gh_issue_comment(on_pr=True))
+    assert _branches(ev) == (None, None)
+    ev = normalize("github-issue", p.gh_headers("issues"), p.gh_issues())
+    assert _branches(ev) == (None, None)
+
+
+def test_gitlab_mr_branches():
+    ev = normalize("gitlab-mr", p.gl_headers("Merge Request Hook"), p.gl_merge_request())
+    assert _branches(ev) == ("feature/x", "main")
+    ev = normalize("gitlab-mr", p.gl_headers("Note Hook"), p.gl_note(on_mr=True))
+    assert _branches(ev) == ("feature/x", "main")
+    ev = normalize("gitlab-issue", p.gl_headers("Issue Hook"), p.gl_issue())
+    assert _branches(ev) == (None, None)
+    ev = normalize("gitlab-issue", p.gl_headers("Note Hook"), p.gl_note(on_mr=False))
+    assert _branches(ev) == (None, None)
+
+
+def test_branches_absent_are_none():
+    ev = normalize("grafana-alert", {}, p.grafana_alert())
+    assert _branches(ev) == (None, None)
+    gh = p.gh_pull_request()
+    gh["pull_request"]["head"] = {"ref": 5}
+    gh["pull_request"]["base"] = "main"
+    ev = normalize("github-pr", p.gh_headers("pull_request"), gh)
+    assert _branches(ev) == (None, None)
+    del gh["pull_request"]["head"], gh["pull_request"]["base"]
+    assert _branches(normalize("github-pr", p.gh_headers("pull_request"), gh)) == (None, None)
+    gl = p.gl_merge_request()
+    gl["object_attributes"]["source_branch"] = None
+    del gl["object_attributes"]["target_branch"]
+    assert _branches(normalize("gitlab-mr", p.gl_headers("Merge Request Hook"), gl)) == (
+        None,
+        None,
+    )
+    note = p.gl_note(on_mr=True)
+    note["merge_request"]["source_branch"] = ""
+    note["merge_request"]["target_branch"] = ["x"]
+    assert _branches(normalize("gitlab-mr", p.gl_headers("Note Hook"), note)) == (None, None)
