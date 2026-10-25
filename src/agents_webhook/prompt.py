@@ -10,6 +10,8 @@ frame them themselves. Any render failure raises `TemplateError` (the event fail
 import asyncio
 import json
 import multiprocessing
+import resource
+import sys
 from dataclasses import asdict
 from typing import Any
 from xml.sax.saxutils import escape, quoteattr
@@ -48,6 +50,7 @@ MAX_RANGE = 10_000
 MAX_EXPONENT = 1000
 MAX_INT_BITS = 14_300  # about 4300 decimal digits
 DEFAULT_TIMEOUT_SECONDS = 2.0
+DEFAULT_MEMORY_MB = 256
 
 
 def _bounded_range(*args: int) -> range:
@@ -151,8 +154,28 @@ def _render_in_process(
     return _truncate("".join(chunks))
 
 
-def _child(conn, event, template, payload) -> None:
+def _cap_memory(memory_mb: int) -> None:
+    """Cap the child's address space at its current size plus `memory_mb` (Linux enforces it)."""
+    baseline = 0
     try:
+        with open("/proc/self/statm") as fh:
+            baseline = int(fh.read().split()[0]) * resource.getpagesize()
+    except (OSError, ValueError, IndexError):
+        pass
+    limit = baseline + memory_mb * 1024 * 1024
+    try:
+        _, hard = resource.getrlimit(resource.RLIMIT_AS)
+        if hard != resource.RLIM_INFINITY:
+            limit = min(limit, hard)
+        resource.setrlimit(resource.RLIMIT_AS, (limit, hard))
+    except (OSError, ValueError):
+        if sys.platform == "linux":
+            raise
+
+
+def _child(conn, event, template, payload, memory_mb) -> None:
+    try:
+        _cap_memory(memory_mb)
         conn.send((True, _render_in_process(event, template, payload)))
     except BaseException as exc:
         conn.send((False, f"{type(exc).__name__}: {exc}"))
@@ -169,7 +192,11 @@ def _mp_context():
 
 
 def _render_template(
-    event: NormalizedEvent, template: str, payload: dict[str, Any] | None, timeout: float
+    event: NormalizedEvent,
+    template: str,
+    payload: dict[str, Any] | None,
+    timeout: float,
+    memory_mb: int,
 ) -> str:
     try:
         _check_size(template)
@@ -178,7 +205,9 @@ def _render_template(
     try:
         ctx = _mp_context()
         parent, child = ctx.Pipe(duplex=False)
-        proc = ctx.Process(target=_child, args=(child, event, template, payload), daemon=True)
+        proc = ctx.Process(
+            target=_child, args=(child, event, template, payload, memory_mb), daemon=True
+        )
         proc.start()
     except Exception as exc:
         raise TemplateError(f"template render failed to start: {exc}") from exc
@@ -207,12 +236,13 @@ def render(
     update: bool = False,
     payload: dict[str, Any] | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    memory_mb: int = DEFAULT_MEMORY_MB,
 ) -> str:
-    """Render the prompt; a template runs in a killable child process bounded by `timeout`."""
+    """Render the prompt; a template runs in a killable child bounded by time and memory."""
     if template is None:
         text = _default(event)
     else:
-        text = _render_template(event, template, payload, timeout)
+        text = _render_template(event, template, payload, timeout, memory_mb)
     return f"{UPDATE_PREFIX}\n\n{text}" if update else text
 
 
@@ -252,10 +282,13 @@ def preview(
     payload: dict[str, Any] | None = None,
     event: NormalizedEvent | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    memory_mb: int = DEFAULT_MEMORY_MB,
 ) -> str:
     """Render `template` against an example payload (and a sample event) to check it."""
     validate_template(template)
-    return render(event or SAMPLE_EVENT, template, payload=payload, timeout=timeout)
+    return render(
+        event or SAMPLE_EVENT, template, payload=payload, timeout=timeout, memory_mb=memory_mb
+    )
 
 
 async def render_async(
@@ -265,9 +298,16 @@ async def render_async(
     update: bool = False,
     payload: dict[str, Any] | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    memory_mb: int = DEFAULT_MEMORY_MB,
 ) -> str:
     return await asyncio.to_thread(
-        render, event, template, update=update, payload=payload, timeout=timeout
+        render,
+        event,
+        template,
+        update=update,
+        payload=payload,
+        timeout=timeout,
+        memory_mb=memory_mb,
     )
 
 
@@ -276,5 +316,6 @@ async def preview_async(
     payload: dict[str, Any] | None = None,
     event: NormalizedEvent | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    memory_mb: int = DEFAULT_MEMORY_MB,
 ) -> str:
-    return await asyncio.to_thread(preview, template, payload, event, timeout)
+    return await asyncio.to_thread(preview, template, payload, event, timeout, memory_mb)

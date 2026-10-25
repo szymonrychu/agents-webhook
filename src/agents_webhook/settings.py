@@ -26,6 +26,7 @@ class WebhookSettings(BaseServiceSettings):
     trusted_proxies: CsvList = []
     min_password_length: int = Field(16, ge=1)
     template_timeout_seconds: float = Field(2.0, gt=0)
+    template_memory_mb: int = Field(256, ge=32)
     api_allowed_cidrs: CsvList = ["127.0.0.1/32"]
 
     @field_validator("public_base_url")

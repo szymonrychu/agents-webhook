@@ -358,6 +358,7 @@ class Worker:
                 update=update,
                 payload=event.payload if isinstance(event.payload, dict) else None,
                 timeout=self.settings.template_timeout_seconds,
+                memory_mb=self.settings.template_memory_mb,
             )
         except prompt.TemplateError as exc:
             log.warning("event %s: template error: %s", event.id, exc)

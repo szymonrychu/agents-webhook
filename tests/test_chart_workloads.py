@@ -141,7 +141,7 @@ def test_secrets_not_in_configmap_and_no_source_secrets():
     stored = {k: v for d in docs if d["kind"] == "Secret" for k, v in d["stringData"].items()}
     assert set(stored) == {"uri", "token"}
     everything = yaml.safe_dump_all(docs)
-    assert "sources" not in everything.lower()
+    assert "sources" not in everything.lower().replace("resources", "")
     for name in env_names_all(docs):
         assert not (name.endswith(("_SECRET", "_TOKEN")) and name != "WEBHOOK_ORCHESTRATOR_TOKEN")
 
@@ -248,3 +248,16 @@ def test_api_allowed_cidrs_rendered():
         env_values(main_container(custom["api"]))["WEBHOOK_API_ALLOWED_CIDRS"]
         == "127.0.0.1/32,10.0.0.0/8"
     )
+
+
+def test_default_resources_and_template_memory():
+    docs = render()
+    for name, dep in deployments(docs).items():
+        res = main_container(dep)["resources"]
+        assert res["requests"]["memory"], name
+        assert res["limits"]["memory"], name
+    data = next(d for d in docs if d["kind"] == "ConfigMap")["data"]
+    assert data["WEBHOOK_TEMPLATE_MEMORY_MB"] == "256"
+    docs = render({"templateMemoryMb": 128})
+    data = next(d for d in docs if d["kind"] == "ConfigMap")["data"]
+    assert data["WEBHOOK_TEMPLATE_MEMORY_MB"] == "128"

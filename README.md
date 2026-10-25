@@ -36,6 +36,7 @@ Every setting is an environment variable. The first block is read by all subcomm
 | `WEBHOOK_TRUSTED_PROXIES` | empty | comma-separated CIDRs whose `X-Forwarded-For` is trusted |
 | `WEBHOOK_MIN_PASSWORD_LENGTH` | 16 | shortest accepted caller-chosen password |
 | `WEBHOOK_TEMPLATE_TIMEOUT_SECONDS` | 2.0 | per-render time limit for prompt templates |
+| `WEBHOOK_TEMPLATE_MEMORY_MB` | 256 | memory a template render child may allocate beyond its baseline (`RLIMIT_AS`, enforced on Linux); over it the event fails `template_error`. Chart value `templateMemoryMb` |
 | `WEBHOOK_DATABASE_URL` | required | Postgres URL |
 | `WEBHOOK_HTTP_HOST` | `0.0.0.0` | listen address |
 | `WEBHOOK_HTTP_PORT` | 8000 | listen port |
@@ -164,7 +165,7 @@ curl -u "$USERNAME:$PASSWORD" -H 'Content-Type: application/json' \
 
 An endpoint's `prompt_template` is a Jinja2 template for the initial prompt. Without one the default prompt is used: a preamble plus an escaped `<event>` data block.
 
-- Templates run in a sandboxed Jinja2 environment (`ImmutableSandboxedEnvironment`): no loader (no `include` or `import` of files), autoescape off, `StrictUndefined` (an undefined variable is an error, not an empty string), output capped at 64 KiB, template source at most 16 KiB, `range` limited to 10000 items, and repetition, product and power results bounded. Each render runs in a child process killed after `WEBHOOK_TEMPLATE_TIMEOUT_SECONDS` (default 2).
+- Templates run in a sandboxed Jinja2 environment (`ImmutableSandboxedEnvironment`): no loader (no `include` or `import` of files), autoescape off, `StrictUndefined` (an undefined variable is an error, not an empty string), output capped at 64 KiB, template source at most 16 KiB, `range` limited to 10000 items, and repetition, product and power results bounded. Each render runs in a child process killed after `WEBHOOK_TEMPLATE_TIMEOUT_SECONDS` (default 2) and capped at `WEBHOOK_TEMPLATE_MEMORY_MB` (default 256) of address space, so filters such as `center(10**9)` fail with `template_error` instead of exhausting the pod. The chart sets default `resources` for ingest (limit 256Mi), api and worker (limit 640Mi, above the cap plus the pod's own usage); override under `components.<name>.resources`.
 - The `from_json` filter parses a JSON string into a value: `{% set body = payload.message | from_json %}{{ body.field }}`. A value that is not valid JSON is a render error.
 - Context variables for every type: `type`, `source`, `kind`, `action`, `repo`, `number`, `title`, `body`, `comment_body` (null unless the event is a comment), `url`, `author`, `actor`, `labels`, `delivery_id`, `dedup_key`, `priority`, `draft`, `changed`, plus `payload` (the raw request JSON, `{}` when it is not an object) and `event` (the default block, fully escaped). The other variables are raw: escape or frame untrusted text yourself.
 - `labels` is a list of names for `github-issue`, `github-pr`, `gitlab-issue` and `gitlab-mr`, and a mapping (the alert's `commonLabels`) for `grafana-alert`.

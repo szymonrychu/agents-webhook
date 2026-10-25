@@ -48,6 +48,11 @@ limits:
   # WEBHOOK_MAX_BODY_BYTES: largest accepted request body (5 MiB).
   maxBodyBytes: 5242880
 
+# WEBHOOK_TEMPLATE_MEMORY_MB: address space a prompt-template render child may allocate beyond
+# its own baseline (RLIMIT_AS). A render over it fails the event with template_error. Keep every
+# api and worker memory limit above this plus the pod's own usage (about 150 MiB).
+templateMemoryMb: 256
+
 # Extra WEBHOOK_* settings; keys must start with WEBHOOK_.
 env: {}
 
@@ -57,14 +62,20 @@ components:
   ingest:
     replicas: 2
     podAnnotations: {}
-    resources: {}
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {memory: 256Mi}
   api:
     replicas: 1
     podAnnotations: {}
-    resources: {}
+    resources:
+      requests: {cpu: 50m, memory: 192Mi}
+      limits: {memory: 640Mi}
   worker:
     replicas: 1
-    resources: {}
+    resources:
+      requests: {cpu: 50m, memory: 192Mi}
+      limits: {memory: 640Mi}
 
 podLabels: {}
 terminationGracePeriodSeconds: 30

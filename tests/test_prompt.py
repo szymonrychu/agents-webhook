@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 from agents_webhook.normalize import NormalizedEvent
@@ -218,3 +220,17 @@ async def test_template_async_wrappers():
     assert (await preview_async("{{ payload.a }}", {"a": 1})) == "1"
     with pytest.raises(TemplateError):
         await render_async(make(), "{{ nope }}")
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="macOS does not enforce RLIMIT_AS; runs on Linux CI"
+)
+def test_render_memory_cap_yields_template_error():
+    for tpl in (
+        '{{ "x"|center(10**9) }}',
+        '{{ "x"|indent(10**9) }}',
+        '{{ "a b"|wordwrap(10**9) }}',
+    ):
+        with pytest.raises(TemplateError):
+            render(make(), tpl, memory_mb=64, timeout=10)
+    assert render(make(), "{{ title }}", memory_mb=64) == "T"

@@ -162,6 +162,7 @@ def build_router(
                 payload,
                 event,
                 timeout=settings.template_timeout_seconds,
+                memory_mb=settings.template_memory_mb,
             )
         except (ValueError, prompt.TemplateError) as exc:
             raise _invalid(f"template: {exc}") from exc

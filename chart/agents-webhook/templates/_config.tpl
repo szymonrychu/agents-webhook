@@ -7,6 +7,7 @@ WEBHOOK_MAX_IN_PROGRESS: {{ .Values.limits.maxInProgress | int | toString | quot
 WEBHOOK_MAX_IN_PROGRESS_PER_ENDPOINT: {{ .Values.limits.maxInProgressPerEndpoint | int | toString | quote }}
 WEBHOOK_MAX_QUEUE: {{ .Values.limits.queueCap | int | toString | quote }}
 WEBHOOK_MAX_BODY_BYTES: {{ .Values.limits.maxBodyBytes | int | toString | quote }}
+WEBHOOK_TEMPLATE_MEMORY_MB: {{ .Values.templateMemoryMb | int | toString | quote }}
 {{- range $k, $v := .Values.env }}
 {{- if not (hasPrefix "WEBHOOK_" $k) }}
 {{- fail (printf "agents-webhook: env key %q must start with WEBHOOK_" $k) }}
