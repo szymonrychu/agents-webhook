@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import contextlib
+import json
 import logging
 import sys
 from collections.abc import Awaitable, Callable, Sequence
@@ -75,7 +76,12 @@ class BodyReadTimeout:
                         ],
                     }
                 )
-                await send({"type": "http.response.body", "body": b'{"error":"request_timeout"}'})
+                await send({"type": "http.response.body", "body": _TIMEOUT_BODY})
+
+
+_TIMEOUT_BODY = json.dumps(
+    {"error": {"code": "request_timeout", "message": "request timeout"}}
+).encode()
 
 
 class _BodyTimeout(Exception):

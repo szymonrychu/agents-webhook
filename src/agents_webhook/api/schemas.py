@@ -1,9 +1,10 @@
 """Request and response models of the UI API (`/webhooks/api/v1`)."""
 
+import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class EndpointIn(BaseModel):
@@ -13,6 +14,16 @@ class EndpointIn(BaseModel):
     username: str | None = None
     password: str | None = Field(default=None, repr=False)
     prompt_template: str | None = None
+
+    @field_validator("preset_id")
+    @classmethod
+    def _preset_is_uuid(cls, value: str) -> str:
+        """The orchestrator serves presets by UUID only; anything else is an unknown preset."""
+        try:
+            uuid.UUID(value)
+        except ValueError:
+            raise ValueError(f"unknown preset {value!r}") from None
+        return value
 
 
 class RotateIn(BaseModel):

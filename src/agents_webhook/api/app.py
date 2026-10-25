@@ -80,6 +80,10 @@ def create_api_app(
     async def _invalid(request: Request, exc: RequestValidationError) -> JSONResponse:
         first = exc.errors()[0] if exc.errors() else {}
         where = ".".join(str(part) for part in first.get("loc", ()) if part != "body")
+        if where == "preset_id" and first.get("type") == "value_error":
+            return _error(
+                422, "unknown_preset", f"preset_id: {first['msg'].removeprefix('Value error, ')}"
+            )
         return _error(422, "invalid_request", f"{where}: {first.get('msg', 'invalid request')}")
 
     @app.exception_handler(StarletteHTTPException)

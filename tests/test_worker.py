@@ -658,3 +658,22 @@ async def test_retention_batches_and_runs_at_most_hourly(
     now[0] += 3600
     await w.prune_events()
     assert await count_ids(conn, [fresh]) == 0
+
+
+async def test_worker_context_matches_preview_for_draft_and_changed(
+    conn, fake, make_endpoint, make_worker
+):
+    template = "draft={{ draft }} changed={{ changed | join(',') }} {{ title }}"
+    ep = await make_endpoint(template=template)
+    event = ev(draft=True, changed=("description", "title"))
+    recorded = await events.record(conn, ep, event, PAYLOAD, ignore_reason=None, max_queue=1000)
+    stored = await row(conn, recorded.id)
+    assert stored.draft is True and stored.changed == ["description", "title"]
+
+    await make_worker().tick()
+
+    cluster = cluster_of(fake, f"wh-{recorded.id}")
+    [msg] = messages_of(fake, cluster["id"])
+    expected = prompt.preview(template, PAYLOAD, event)
+    assert expected == "draft=True changed=description,title Fix the thing"
+    assert msg["text"] == f"{expected}\n\n{marker('webhook:event', recorded.id)}"
