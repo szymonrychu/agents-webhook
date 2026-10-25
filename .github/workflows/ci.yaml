@@ -1,0 +1,152 @@
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: mise run install
+      - run: mise run lint
+
+  # Docker is preinstalled on ubuntu-latest; the database tests start Postgres through testcontainers.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: mise run install
+      - run: mise run test
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: mise run install
+      - run: mise run lint:chart
+      - run: mise run test:chart
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: mise run install
+      - run: mise run test:e2e
+
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HARBOR_URL: harbor.szymonrichert.pl
+      IMAGE: harbor.szymonrichert.pl/containers/agents-webhook
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute short sha
+        run: echo "SHORTSHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - name: Build image
+        run: docker build -t agents-webhook:ci .
+      - name: Smoke test
+        run: docker run --rm agents-webhook:ci --help
+      - uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # main as of 2026-10-25
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Login to Harbor
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: echo "$HARBOR_PASSWORD" | regctl registry login "$HARBOR_URL" -u "$HARBOR_USERNAME" --pass-stdin
+      # Cloudflare in front of Harbor answers 413 to request bodies over 100MB,
+      # so layers go up in 50MB chunks instead of docker push's single upload.
+      - name: Push image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker save agents-webhook:ci -o image.tar
+          regctl registry set "$HARBOR_URL" --blob-chunk 52428800 --blob-max 52428800
+          regctl image import "$IMAGE:$SHORTSHA" image.tar
+
+  chart-publish:
+    needs: [lint, test, chart, e2e, images]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      HARBOR_URL: harbor.szymonrichert.pl
+      CHART_REPO: oci://harbor.szymonrichert.pl/charts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # main as of 2026-10-25
+      - name: Compute version
+        run: |
+          SHA7="${GITHUB_SHA::7}"
+          VERSION="$(scripts/chart-version.sh branch "$GITHUB_REF_NAME" "$GITHUB_SHA")"
+          echo "SHA7=$SHA7" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: Login to Harbor
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          # Harbor robot accounts reject the Helm 4 login probe, so credentials are written to the registry config.json.
+          mkdir -p "$HOME/.config/helm/registry"
+          AUTH="$(printf '%s:%s' "$HARBOR_USERNAME" "$HARBOR_PASSWORD" | base64 -w0)"
+          printf '{"auths":{"%s":{"auth":"%s"}}}' "$HARBOR_URL" "$AUTH" > "$HOME/.config/helm/registry/config.json"
+          echo "$HARBOR_PASSWORD" | regctl registry login "$HARBOR_URL" -u "$HARBOR_USERNAME" --pass-stdin
+      - name: Refuse an existing version
+        run: |
+          if helm show chart "$CHART_REPO/agents-webhook" --version "$VERSION" > /dev/null 2>&1; then
+            echo "chart version $VERSION already published; bump chart/agents-webhook/Chart.yaml version"
+            exit 1
+          fi
+      - name: Package
+        run: helm package chart/agents-webhook --version "$VERSION" --app-version "$SHA7"
+      - name: Push
+        run: helm push "agents-webhook-$VERSION.tgz" "$CHART_REPO"
+
+  chart-publish-tag:
+    needs: [chart]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    env:
+      HARBOR_URL: harbor.szymonrichert.pl
+      CHART_REPO: oci://harbor.szymonrichert.pl/charts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # main as of 2026-10-25
+      - name: Compute version
+        run: |
+          SHA7="${GITHUB_SHA::7}"
+          VERSION="$(scripts/chart-version.sh tag "$GITHUB_REF_NAME" "$GITHUB_SHA")"
+          echo "SHA7=$SHA7" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: Login to Harbor
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          # Harbor robot accounts reject the Helm 4 login probe, so credentials are written to the registry config.json.
+          mkdir -p "$HOME/.config/helm/registry"
+          AUTH="$(printf '%s:%s' "$HARBOR_USERNAME" "$HARBOR_PASSWORD" | base64 -w0)"
+          printf '{"auths":{"%s":{"auth":"%s"}}}' "$HARBOR_URL" "$AUTH" > "$HOME/.config/helm/registry/config.json"
+          echo "$HARBOR_PASSWORD" | regctl registry login "$HARBOR_URL" -u "$HARBOR_USERNAME" --pass-stdin
+      - name: Refuse an existing version
+        run: |
+          if helm show chart "$CHART_REPO/agents-webhook" --version "$VERSION" > /dev/null 2>&1; then
+            echo "chart version $VERSION already published; bump chart/agents-webhook/Chart.yaml version"
+            exit 1
+          fi
+      - name: Require the built image
+        run: regctl image digest "$HARBOR_URL/containers/agents-webhook:$SHA7" > /dev/null || { echo "image harbor.szymonrichert.pl/containers/agents-webhook:$SHA7 not found; tag a commit main CI already built"; exit 1; }
+      - name: Package
+        run: helm package chart/agents-webhook --version "$VERSION" --app-version "$SHA7"
+      - name: Push
+        run: helm push "agents-webhook-$VERSION.tgz" "$CHART_REPO"

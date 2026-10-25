@@ -1,0 +1,103 @@
+{{- $tag := required "image.tag is required (set image.tag)" .Values.image.tag }}
+{{- $image := printf "%s:%s" .Values.image.repository $tag }}
+{{- $settingsSum := include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+{{- range $component := list "ingest" "api" "worker" }}
+{{- $cfg := index $.Values.components $component }}
+{{- $labels := dict "context" $ "component" $component }}
+{{- $env := dict "context" $ "component" $component }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agents-webhook.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "agents-webhook.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  replicas: {{ $cfg.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "agents-webhook.componentLabels" $labels | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/settings: {{ $settingsSum }}
+        {{- with $cfg.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "agents-webhook.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: {{ $component }}
+        {{- with $.Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "agents-webhook.imagePullSecrets" $ | nindent 6 }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ $.Values.terminationGracePeriodSeconds }}
+      {{- with $.Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: migrate
+          {{- with $.Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: {{ $image | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["agents-webhook"]
+          args: ["migrate"]
+          {{- include "agents-webhook.env" (dict "context" $ "component" "migrate") | nindent 10 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: {{ $component }}
+          {{- with $.Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: {{ $image | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["agents-webhook"]
+          args: [{{ $component | quote }}]
+          {{- include "agents-webhook.env" $env | nindent 10 }}
+          {{- if ne $component "worker" }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          {{- end }}
+          {{- with $cfg.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with $.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

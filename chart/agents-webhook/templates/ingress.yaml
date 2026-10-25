@@ -1,0 +1,54 @@
+{{- if .Values.ingress.enabled }}
+{{- $ing := .Values.ingress }}
+{{- $host := required "ingress.host is required when ingress.enabled" $ing.host }}
+{{- $tls := $ing.tls | default dict }}
+{{- /* path: public ingest has its own Ingress outside SSO; api stays behind SSO annotations. */}}
+{{- $specs := list
+  (dict "component" "api" "path" "/webhooks/api")
+  (dict "component" "ingest" "path" "/webhook") }}
+{{- range $s := $specs }}
+{{- $name := printf "%s-%s" (include "agents-webhook.fullname" $) $s.component }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "agents-webhook.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $s.component }}
+  {{- $ann := dict }}
+  {{- if eq $s.component "api" }}
+  {{- $ann = merge $ann ($ing.annotations | default dict) }}
+  {{- with $ing.denySourceRanges }}
+  {{- $_ := set $ann "nginx.ingress.kubernetes.io/denylist-source-range" (join "," .) }}
+  {{- end }}
+  {{- else }}
+  {{- $ann = merge (dict "nginx.ingress.kubernetes.io/proxy-body-size" $ing.proxyBodySize "nginx.ingress.kubernetes.io/proxy-read-timeout" $ing.proxyReadTimeout "nginx.ingress.kubernetes.io/proxy-send-timeout" $ing.proxySendTimeout) ($ing.ingestAnnotations | default dict) }}
+  {{- end }}
+  {{- with $ann }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $ing.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- if $tls.secretName }}
+  tls:
+    - hosts:
+        - {{ $host | quote }}
+      secretName: {{ $tls.secretName | quote }}
+  {{- end }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          - path: {{ $s.path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}
+                port:
+                  number: {{ $.Values.service.port }}
+{{- end }}
+{{- end }}

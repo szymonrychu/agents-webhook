@@ -1,0 +1,107 @@
+image:
+  repository: harbor.szymonrichert.pl/containers/agents-webhook
+  # Required: the image tag to deploy.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Postgres is required; there is no in-chart database. Set exactly one of url and existingSecret.
+postgres:
+  url: ""
+  existingSecret: ""
+  existingSecretKey: uri
+
+# The agent-orchestrator the worker and api talk to. url is required; set token or tokenSecret
+# (tokenSecret wins). The ingest pod never receives the token.
+orchestrator:
+  url: ""
+  token: ""
+  tokenSecret:
+    name: ""
+    key: token
+
+# Public base URL used to print webhook URLs (WEBHOOK_PUBLIC_BASE_URL).
+publicBaseUrl: https://lab.szymonrichert.pl
+
+# CIDRs of reverse proxies whose X-Forwarded-For is trusted (WEBHOOK_TRUSTED_PROXIES).
+trustedProxies: []
+
+# Limits, rendered into the settings ConfigMap read by ingest and worker.
+limits:
+  # WEBHOOK_MAX_IN_PROGRESS: events running at once, across all endpoints.
+  maxInProgress: 3
+  # WEBHOOK_MAX_IN_PROGRESS_PER_ENDPOINT: events running at once for one endpoint.
+  maxInProgressPerEndpoint: 1
+  # WEBHOOK_MAX_QUEUE: queued events kept before ingest refuses new ones.
+  queueCap: 500
+  # WEBHOOK_MAX_BODY_BYTES: largest accepted request body (5 MiB).
+  maxBodyBytes: 5242880
+
+# Extra WEBHOOK_* settings; keys must start with WEBHOOK_.
+env: {}
+
+# Pod annotations per component. Put oauth2-proxy / SSO annotations on api only: the public
+# ingest pod must stay out of SSO.
+components:
+  ingest:
+    replicas: 2
+    podAnnotations: {}
+    resources: {}
+  api:
+    replicas: 1
+    podAnnotations: {}
+    resources: {}
+  worker:
+    replicas: 1
+    resources: {}
+
+podLabels: {}
+terminationGracePeriodSeconds: 30
+
+# Used by the network templates (service and ingress).
+service:
+  type: ClusterIP
+  port: 80
+
+# Two Ingresses on one host: <fullname>-api at /webhooks/api (put SSO annotations in
+# `annotations`) and <fullname>-ingest at /webhook, public and outside SSO. Set
+# cert-manager.io/cluster-issuer in annotations/ingestAnnotations only when this release owns
+# the host's certificate.
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  tls:
+    secretName: ""
+  # Annotations for the api Ingress.
+  annotations: {}
+  # Source CIDRs the api Ingress refuses (ingress-nginx denylist; list the cluster node IPs).
+  denySourceRanges: []
+  # Annotations for the ingest Ingress only.
+  ingestAnnotations: {}
+  # Ingest Ingress limits: body size must be >= limits.maxBodyBytes (5 MiB).
+  proxyBodySize: 5m
+  proxyReadTimeout: "60"
+  proxySendTimeout: "60"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

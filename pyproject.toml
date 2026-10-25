@@ -1,0 +1,45 @@
+[project]
+name = "agents-webhook"
+version = "0.1.0"
+description = "Webhook trigger service for the agents platform"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "agents-common @ git+https://github.com/szymonrychu/agents-common@v0.2.0",
+    "fastapi",
+    "jinja2>=3.1.6",
+    "uvicorn[standard]",
+]
+
+[project.scripts]
+agents-webhook = "agents_webhook.cli:main"
+
+[dependency-groups]
+dev = [
+    "agents-common[testing] @ git+https://github.com/szymonrychu/agents-common@v0.2.0",
+    "ruff",
+    "pytest",
+    "pytest-asyncio",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agents_webhook"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

@@ -1,0 +1,11 @@
+{{- /* Validates Secret inputs even when no Deployment includes the env. */ -}}
+{{- $_ := include "agents-webhook.databaseSecretName" . }}
+{{- $_ := include "agents-webhook.tokenSecretName" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agents-webhook.fullname" . }}-settings
+  labels:
+    {{- include "agents-webhook.labels" . | nindent 4 }}
+data:
+  {{- include "agents-webhook.config" . | nindent 2 }}

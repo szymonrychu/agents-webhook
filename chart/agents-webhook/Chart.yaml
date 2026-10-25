@@ -1,0 +1,6 @@
+apiVersion: v2
+name: agents-webhook
+description: Webhook ingest, API and worker that turn external events into orchestrator agent runs
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
