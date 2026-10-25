@@ -278,4 +278,3 @@ def make_stack(pg_url: str) -> Iterator[Callable[..., Stack]]:
     yield make
     for each in reversed(stacks):
         each.stop()
-
