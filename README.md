@@ -117,6 +117,8 @@ An event has one of five statuses: `new` (queued), `in-progress` (claimed, runni
 | `turn_failed` | `failed` | the agent turn failed |
 | `message_failed` | `failed` | the orchestrator failed the prompt message |
 | `message_cancelled` | `failed` | the prompt message was cancelled |
+| `command_<error>` | `failed` | the prompt is a slash command and it failed; `<error>` is the orchestrator's command error (`command_failed` when it gave none) |
+| `command_cancelled` | `failed` | the prompt is a slash command and it was cancelled |
 | `reuse_fallback` | `failed` | a fallback after a failed agent reuse failed; carried as a prefix |
 
 A 4xx from the orchestrator when creating a session or posting fails the event with the error code it returned.
