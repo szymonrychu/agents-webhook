@@ -434,6 +434,48 @@ async def test_failed_turn(conn, fake, make_endpoint, make_worker):
     assert r.reason == "message_failed"
 
 
+async def test_command_prompt_run_handled(conn, fake, make_endpoint, make_worker):
+    """A prompt that is a slash command has no turn: the run is decided by the command outcome."""
+    id = await rec(conn, await make_endpoint(template="/review-pr 12"))
+    w = make_worker()
+    await w.tick()
+    r = await row(conn, id)
+    assert r.status == "in-progress"
+    [msg] = messages_of(fake, session_of(fake, f"wh-{id}")["id"])
+    assert msg["text"].startswith("/review-pr 12")
+
+    fake.complete_command(int(r.message_id), "ok")
+    await w.tick()
+
+    r = await row(conn, id)
+    assert (r.status, r.reason) == ("handled", None)
+    assert r.finished_at is not None
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reason"),
+    [
+        (("unknown_command", "failed"), "command_unknown_command"),
+        ((None, "failed"), "command_failed"),
+        ((None, "cancelled"), "command_cancelled"),
+    ],
+)
+async def test_command_prompt_run_failed_reason(
+    conn, fake, make_endpoint, make_worker, outcome, reason
+):
+    id = await rec(conn, await make_endpoint(template="/review-pr 12"))
+    w = make_worker()
+    await w.tick()
+
+    error, state = outcome
+    fake.fail_command(int((await row(conn, id)).message_id), error, state)
+    await w.tick()
+
+    r = await row(conn, id)
+    assert (r.status, r.reason) == ("failed", reason)
+    assert r.finished_at is not None
+
+
 @pytest.mark.parametrize("gone", ["while_tracking", "before_post"])
 async def test_missing_session_reason(conn, fake, make_endpoint, make_worker, monkeypatch, gone):
     """The run's session disappears: the event fails `session_not_found`."""
