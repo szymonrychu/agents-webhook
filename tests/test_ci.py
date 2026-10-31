@@ -124,9 +124,12 @@ def test_release_job_fetches_full_history_and_tags():
 def test_release_job_computes_version_with_script():
     steps = JOBS["release"]["steps"]
     version = next(i for i, s in enumerate(steps) if s.get("id") == "version")
-    assert steps[version]["run"] == (
-        'echo "version=$(python3 scripts/next_version.py)" >> "$GITHUB_OUTPUT"'
-    )
+    # A bare assignment fails the step (bash -e) when the script fails; inside echo it would not.
+    assert "shell" not in steps[version]
+    assert steps[version]["run"].strip().splitlines() == [
+        'version="$(python3 scripts/next_version.py)"',
+        'echo "version=$version" >> "$GITHUB_OUTPUT"',
+    ]
     later = steps[version + 1 :]
     assert later
     assert all(s.get("if") == RELEASED for s in later)

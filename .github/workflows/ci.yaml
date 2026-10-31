@@ -130,7 +130,9 @@ jobs:
       # Prints nothing when HEAD is already in a vX.Y.Z tag; every later step then skips.
       - name: Compute version
         id: version
-        run: echo "version=$(python3 scripts/next_version.py)" >> "$GITHUB_OUTPUT"
+        run: |
+          version="$(python3 scripts/next_version.py)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # main as of 2026-10-25
         if: steps.version.outputs.version != ''
       - name: Login to Harbor
