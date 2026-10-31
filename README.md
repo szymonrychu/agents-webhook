@@ -148,6 +148,17 @@ Invalid settings exit with code 78, naming every bad variable.
 
 `chart/agents-webhook` deploys the `ingest` (2 replicas), `api` and `worker` Deployments from one image, the settings ConfigMap, a Secret and a Service. Required values: `image.tag`, `orchestrator.url` with `orchestrator.token` or `orchestrator.tokenSecret`, and exactly one of `postgres.url` and `postgres.existingSecret`. `limits.*` render the limit variables above; `publicBaseUrl` and `trustedProxies` render `WEBHOOK_PUBLIC_BASE_URL` and `WEBHOOK_TRUSTED_PROXIES`; `api.allowedCidrs` renders `WEBHOOK_API_ALLOWED_CIDRS` on the api pod only (default `127.0.0.1/32`, so the SSO sidecar is the only caller; the sidecar's `http-insecure` Service port is otherwise open to every in-cluster pod); `env` adds extra `WEBHOOK_*` settings. With `ingress.enabled` there are two Ingresses on one host: `/webhooks/api` (put SSO annotations in `ingress.annotations`) and `/webhook` (public; `ingress.ingestAnnotations`, body limit `ingress.proxyBodySize`, keep it at or above `limits.maxBodyBytes`). Each pod runs `migrate` as an init container.
 
+## Release
+
+Every green push to `main` ends with the `release` job in `.github/workflows/ci.yaml`, which needs every other job of the run, so only a fully green build is released:
+
+- `scripts/next_version.py` computes the version from the conventional commits since the last `vX.Y.Z` git tag (every commit, branch commits behind merge commits included): a `type!:` subject or a `BREAKING CHANGE:` footer bumps major (also on 0.x), `feat` bumps minor, anything else bumps patch. With no `vX.Y.Z` tag yet the first release is `0.1.0`.
+- The job copies the run's image `harbor.szymonrichert.pl/containers/agents-webhook:<sha7>` to the tags `X.Y.Z`, `X.Y` and `X` with `regctl image copy` (manifest only, no layer upload), then pushes git tag `vX.Y.Z` with the job token.
+- When `HEAD` is already in a `vX.Y.Z` tag (a re-run, or a newer commit already released) the job skips everything after the version step. Release jobs run one at a time (concurrency group `release`); retry a failed one with "Re-run failed jobs".
+- agents-helmfile must pin `X.Y.Z`, never `<sha7>`: Harbor retention prunes `<sha7>` tags within hours, semver tags survive it.
+
+The chart is published by the `chart-publish` job on every push to `main`, after `lint`, `test`, `chart`, `e2e` and `images` pass: `scripts/chart-version.sh` gives `<version>-main.<sha7>` from `chart/agents-webhook/Chart.yaml`, with `appVersion` set to `<sha7>`, pushed to `oci://harbor.szymonrichert.pl/charts`. Any other ref, tags included, publishes no chart.
+
 ## Development
 
 ```

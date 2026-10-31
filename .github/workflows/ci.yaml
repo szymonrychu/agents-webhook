@@ -2,7 +2,6 @@ name: ci
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
 
 jobs:
@@ -111,42 +110,54 @@ jobs:
       - name: Push
         run: helm push "agents-webhook-$VERSION.tgz" "$CHART_REPO"
 
-  chart-publish-tag:
-    needs: [chart]
-    if: startsWith(github.ref, 'refs/tags/v')
+  release:
+    needs: [lint, test, chart, e2e, images, chart-publish]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
     env:
       HARBOR_URL: harbor.szymonrichert.pl
-      CHART_REPO: oci://harbor.szymonrichert.pl/charts
+      IMAGE: harbor.szymonrichert.pl/containers/agents-webhook
     steps:
       - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # main as of 2026-10-25
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      # Prints nothing when HEAD is already in a vX.Y.Z tag; every later step then skips.
       - name: Compute version
+        id: version
         run: |
-          SHA7="${GITHUB_SHA::7}"
-          VERSION="$(scripts/chart-version.sh tag "$GITHUB_REF_NAME" "$GITHUB_SHA")"
-          echo "SHA7=$SHA7" >> "$GITHUB_ENV"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          version="$(python3 scripts/next_version.py)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # main as of 2026-10-25
+        if: steps.version.outputs.version != ''
       - name: Login to Harbor
+        if: steps.version.outputs.version != ''
         env:
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: echo "$HARBOR_PASSWORD" | regctl registry login "$HARBOR_URL" -u "$HARBOR_USERNAME" --pass-stdin
+      # Copying within one repository sends only the manifest under the new tag.
+      - name: Tag image
+        if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # Harbor robot accounts reject the Helm 4 login probe, so credentials are written to the registry config.json.
-          mkdir -p "$HOME/.config/helm/registry"
-          AUTH="$(printf '%s:%s' "$HARBOR_USERNAME" "$HARBOR_PASSWORD" | base64 -w0)"
-          printf '{"auths":{"%s":{"auth":"%s"}}}' "$HARBOR_URL" "$AUTH" > "$HOME/.config/helm/registry/config.json"
-          echo "$HARBOR_PASSWORD" | regctl registry login "$HARBOR_URL" -u "$HARBOR_USERNAME" --pass-stdin
-      - name: Refuse an existing version
+          SHORTSHA="${GITHUB_SHA::7}"
+          VERSION_MINOR="${VERSION%.*}"
+          VERSION_MAJOR="${VERSION%%.*}"
+          regctl image copy "$IMAGE:$SHORTSHA" "$IMAGE:$VERSION"
+          regctl image copy "$IMAGE:$SHORTSHA" "$IMAGE:$VERSION_MINOR"
+          regctl image copy "$IMAGE:$SHORTSHA" "$IMAGE:$VERSION_MAJOR"
+      # Last, so a failure before it leaves no tag and a re-run repeats the idempotent copies.
+      - name: Push git tag
+        if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if helm show chart "$CHART_REPO/agents-webhook" --version "$VERSION" > /dev/null 2>&1; then
-            echo "chart version $VERSION already published; bump chart/agents-webhook/Chart.yaml version"
-            exit 1
-          fi
-      - name: Require the built image
-        run: regctl image digest "$HARBOR_URL/containers/agents-webhook:$SHA7" > /dev/null || { echo "image harbor.szymonrichert.pl/containers/agents-webhook:$SHA7 not found; tag a commit main CI already built"; exit 1; }
-      - name: Package
-        run: helm package chart/agents-webhook --version "$VERSION" --app-version "$SHA7"
-      - name: Push
-        run: helm push "agents-webhook-$VERSION.tgz" "$CHART_REPO"
+          git tag "v$VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/v$VERSION"
