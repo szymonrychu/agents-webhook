@@ -261,3 +261,60 @@ def test_default_resources_and_template_memory():
     docs = render({"templateMemoryMb": 128})
     data = next(d for d in docs if d["kind"] == "ConfigMap")["data"]
     assert data["WEBHOOK_TEMPLATE_MEMORY_MB"] == "128"
+
+
+ADMIN = {
+    "admin": {
+        "enabled": True,
+        "servicePort": 8002,
+        "tokensSecret": {"name": "wh-admin-tokens", "key": "tokens"},
+    }
+}
+
+
+def test_admin_listener_off_by_default():
+    docs = render()
+    api = main_container(deployments(docs)["api"])
+    assert "WEBHOOK_ADMIN_TOKENS_FILE" not in env_names(api)
+    assert [p["name"] for p in api["ports"]] == ["http"]
+    svc = next(d for d in docs if d["kind"] == "Service" and d["metadata"]["name"].endswith("-api"))
+    assert [p["name"] for p in svc["spec"]["ports"]] == ["http"]
+
+
+def test_admin_listener_wired_on_api_only():
+    docs = render(ADMIN)
+    deps = deployments(docs)
+    api = main_container(deps["api"])
+    env = env_values(api)
+    assert env["WEBHOOK_ADMIN_TOKENS_FILE"] == "/var/run/secrets/admin/tokens"
+    assert env["WEBHOOK_ADMIN_PORT"] == "8001"
+    assert {"name": "admin", "containerPort": 8001, "protocol": "TCP"} in api["ports"]
+    mount = next(m for m in api["volumeMounts"] if m["name"] == "admin-tokens")
+    assert mount["mountPath"] == "/var/run/secrets/admin" and mount["readOnly"] is True
+    volumes = deps["api"]["spec"]["template"]["spec"]["volumes"]
+    vol = next(v for v in volumes if v["name"] == "admin-tokens")
+    assert vol["secret"]["secretName"] == "wh-admin-tokens"
+    assert vol["secret"]["items"] == [{"key": "tokens", "path": "tokens"}]
+    for name in ("ingest", "worker"):
+        assert "WEBHOOK_ADMIN_TOKENS_FILE" not in env_names(main_container(deps[name]))
+        names = [v["name"] for v in deps[name]["spec"]["template"]["spec"]["volumes"]]
+        assert "admin-tokens" not in names
+    svc = next(d for d in docs if d["kind"] == "Service" and d["metadata"]["name"].endswith("-api"))
+    assert {"name": "admin", "port": 8002, "targetPort": "admin", "protocol": "TCP"} in svc["spec"][
+        "ports"
+    ]
+    ingest = next(
+        d for d in docs if d["kind"] == "Service" and d["metadata"]["name"].endswith("-ingest")
+    )
+    assert [p["name"] for p in ingest["spec"]["ports"]] == ["http"]
+
+
+def test_admin_port_is_configurable():
+    docs = render({"admin": {**ADMIN["admin"], "port": 9100}})
+    api = main_container(deployments(docs)["api"])
+    assert env_values(api)["WEBHOOK_ADMIN_PORT"] == "9100"
+    assert any(p["containerPort"] == 9100 for p in api["ports"])
+
+
+def test_admin_tokens_secret_name_required_when_admin_keys_set():
+    assert "admin.tokensSecret.name" in render_error({**BASE, "admin": {"enabled": True}})

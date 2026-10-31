@@ -69,6 +69,11 @@ spec:
             - name: http
               containerPort: 8000
               protocol: TCP
+            {{- if and $.Values.admin.enabled (eq $component "api") }}
+            - name: admin
+              containerPort: {{ $.Values.admin.port }}
+              protocol: TCP
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -85,9 +90,22 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if and $.Values.admin.enabled (eq $component "api") }}
+            - name: admin-tokens
+              mountPath: {{ include "agents-webhook.adminTokensDir" $ }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if and $.Values.admin.enabled (eq $component "api") }}
+        - name: admin-tokens
+          secret:
+            secretName: {{ include "agents-webhook.adminTokensSecret" $ }}
+            items:
+              - key: {{ $.Values.admin.tokensSecret.key | default "tokens" }}
+                path: tokens
+        {{- end }}
       {{- with $.Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

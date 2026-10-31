@@ -98,6 +98,14 @@ token
 {{- end -}}
 {{- end }}
 
+{{/* Mount point of the admin tokens file (the Secret key is projected to "tokens"). */}}
+{{- define "agents-webhook.adminTokensDir" -}}/var/run/secrets/admin{{- end }}
+
+{{/* Name of the admin tokens Secret; fails when the admin listener is on without one. */}}
+{{- define "agents-webhook.adminTokensSecret" -}}
+{{- required "admin.tokensSecret.name is required when admin.enabled" .Values.admin.tokensSecret.name -}}
+{{- end }}
+
 {{/*
 Container env for a component. Call with (dict "context" . "component" "api"):
 the settings ConfigMap, the database URL, and the orchestrator token for api and worker only.
@@ -115,6 +123,12 @@ env:
 {{- if eq .component "api" }}
   - name: WEBHOOK_API_ALLOWED_CIDRS
     value: {{ join "," (.context.Values.api.allowedCidrs | default (list "127.0.0.1/32")) | quote }}
+{{- if .context.Values.admin.enabled }}
+  - name: WEBHOOK_ADMIN_PORT
+    value: {{ .context.Values.admin.port | int | toString | quote }}
+  - name: WEBHOOK_ADMIN_TOKENS_FILE
+    value: {{ printf "%s/tokens" (include "agents-webhook.adminTokensDir" .context) | quote }}
+{{- end }}
 {{- end }}
 {{- if has .component (list "api" "worker") }}
   - name: WEBHOOK_ORCHESTRATOR_TOKEN

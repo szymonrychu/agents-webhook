@@ -13,10 +13,11 @@ from agents_common.db.migrate import run_migrations
 from agents_common.db.pool import open_pool
 from agents_common.orchestrator import OrchestratorClient
 from agents_common.runtime import run_service
+from agents_common.service_gate import load_tokens
 from agents_common.settings import SettingsError, load_settings
 
 from agents_webhook import __version__
-from agents_webhook.api.app import create_api_app
+from agents_webhook.api.app import create_admin_app, create_api_app
 from agents_webhook.ingest.app import create_ingest_app
 from agents_webhook.settings import LocalSettings, WebhookSettings
 from agents_webhook.worker import run_worker
@@ -94,12 +95,14 @@ class _Server(uvicorn.Server):
         return contextlib.nullcontext()
 
 
-def _base_config(app, settings: WebhookSettings, **extra) -> uvicorn.Config:
+def _base_config(
+    app, settings: WebhookSettings, *, port: int | None = None, **extra
+) -> uvicorn.Config:
     # Proxy headers stay off: the peer address is the TCP peer, X-Forwarded-For cannot spoof it.
     return uvicorn.Config(
         app,
         host=settings.http_host,
-        port=settings.http_port,
+        port=settings.http_port if port is None else port,
         proxy_headers=False,
         log_config=None,
         timeout_graceful_shutdown=int(settings.shutdown_grace_seconds),
@@ -122,6 +125,22 @@ def build_ingest_config(settings: WebhookSettings, pool) -> uvicorn.Config:
 
 def build_api_config(settings: WebhookSettings, pool, client) -> uvicorn.Config:
     return _base_config(create_api_app(settings, pool, client), settings)
+
+
+def build_admin_config(
+    settings: WebhookSettings, pool, client, tokens: Sequence[str]
+) -> uvicorn.Config:
+    """Service listener: the UI routes behind a bearer token, on its own port."""
+    return _base_config(
+        create_admin_app(settings, pool, client, tokens), settings, port=settings.admin_port
+    )
+
+
+def load_admin_tokens(settings: WebhookSettings) -> list[str] | None:
+    """The accepted admin tokens, or None when the admin listener is not configured."""
+    if not settings.admin_tokens_file:
+        return None
+    return load_tokens(settings.admin_tokens_file)
 
 
 def _client(settings: WebhookSettings) -> OrchestratorClient:
@@ -174,8 +193,18 @@ def _cmd_ingest(settings: WebhookSettings) -> int:
 
 
 def _cmd_api(settings: WebhookSettings) -> int:
+    try:
+        tokens = load_admin_tokens(settings)
+    except (OSError, ValueError) as exc:
+        print(f"WEBHOOK_ADMIN_TOKENS_FILE: {exc}", file=sys.stderr)
+        return EXIT_BAD_SETTINGS
+
     async def body(pool, client, stop):
-        await _serve(build_api_config(settings, pool, client), stop)
+        async with asyncio.TaskGroup() as group:
+            group.create_task(_serve(build_api_config(settings, pool, client), stop))
+            if tokens is not None:
+                config = build_admin_config(settings, pool, client, tokens)
+                group.create_task(_serve(config, stop))
 
     return _run(settings, body, client=True)
 
