@@ -658,3 +658,19 @@ async def test_no_password_in_logs(api, preset, caplog):
     await api.post(f"{P}/endpoints/{created['id']}/rotate", json={})
     assert created["password"] not in caplog.text
     assert json.dumps("hash") not in caplog.text
+
+
+async def test_preview_template_golden_response(api):
+    body = {
+        "type": "github-pr",
+        "example": p.gh_pull_request(),
+        "template": "{{ title }} #{{ number }} by {{ author }}",
+    }
+    resp = await api.post(f"{P}/templates/preview", json=body)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"prompt": "Fix it #7 by alice", "filters": None}
+    bad = await api.post(f"{P}/templates/preview", json={**body, "template": "{{ nope }}"})
+    assert bad.status_code == 422
+    assert code(bad) == "invalid_request"
+    assert bad.json()["error"]["message"].startswith("template: ")
+    assert "nope" in bad.json()["error"]["message"]

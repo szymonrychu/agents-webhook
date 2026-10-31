@@ -203,12 +203,12 @@ def test_template_render_with_live_thread_emits_no_fork_warning():
 
 
 def test_template_start_failure_is_template_error(monkeypatch):
-    from agents_webhook import prompt
+    from agents_common import templating
 
     def boom():
         raise OSError("no processes")
 
-    monkeypatch.setattr(prompt, "_mp_context", boom)
+    monkeypatch.setattr(templating, "_mp_context", boom)
     with pytest.raises(TemplateError, match="start"):
         render(make(), "{{ title }}")
 
@@ -231,3 +231,15 @@ def test_render_memory_cap_yields_template_error():
         with pytest.raises(TemplateError):
             render(make(), tpl, memory_mb=64, timeout=10)
     assert render(make(), "{{ title }}", memory_mb=64) == "T"
+
+
+def test_prompt_module_holds_no_sandbox_code():
+    from pathlib import Path
+
+    import agents_common.templating as common
+
+    from agents_webhook import prompt
+
+    text = Path(prompt.__file__).read_text()
+    assert "ImmutableSandboxedEnvironment" not in text
+    assert prompt.TemplateError is common.TemplateError
