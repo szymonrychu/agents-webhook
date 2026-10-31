@@ -27,6 +27,8 @@ class WebhookSettings(BaseServiceSettings):
     template_timeout_seconds: float = Field(2.0, gt=0)
     template_memory_mb: int = Field(256, ge=32)
     api_allowed_cidrs: CsvList = ["127.0.0.1/32"]
+    admin_port: int = Field(8001, ge=1, le=65535)
+    admin_tokens_file: str = ""
 
     @field_validator("public_base_url")
     @classmethod
@@ -44,6 +46,12 @@ class WebhookSettings(BaseServiceSettings):
                     f"WEBHOOK_{str(info.field_name).upper()}::not a CIDR: {item!r}"
                 ) from None
         return value
+
+    @model_validator(mode="after")
+    def _admin_port_is_free(self):
+        if self.admin_tokens_file and self.admin_port == self.http_port:
+            raise ValueError("WEBHOOK_ADMIN_PORT::must differ from WEBHOOK_HTTP_PORT")
+        return self
 
     def api_networks(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
         return [ipaddress.ip_network(c, strict=False) for c in self.api_allowed_cidrs]

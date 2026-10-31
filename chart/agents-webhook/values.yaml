@@ -37,6 +37,17 @@ api:
   allowedCidrs:
     - 127.0.0.1/32
 
+# Token-gated admin listener (second port of the api pod, same routes, bearer tokens only).
+# Off by default. tokensSecret names a Secret whose key holds one token per line; it is mounted
+# into the api pod only, as a file named by WEBHOOK_ADMIN_TOKENS_FILE.
+admin:
+  enabled: false
+  port: 8001
+  servicePort: 8001
+  tokensSecret:
+    name: ""
+    key: tokens
+
 # Limits, rendered into the settings ConfigMap read by ingest and worker.
 limits:
   # WEBHOOK_MAX_IN_PROGRESS: events running at once, across all endpoints.

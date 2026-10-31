@@ -7,9 +7,11 @@ Authorization header.
 
 import ipaddress
 import logging
+from collections.abc import Iterable
 
 import psycopg
 from agents_common.orchestrator import OrchestratorClient
+from agents_common.service_gate import ServiceTokenGate
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
@@ -60,7 +62,7 @@ class SourceAllowlist:
         await _error(403, "forbidden", "source address is not allowed")(scope, receive, send)
 
 
-def create_api_app(
+def _build_app(
     settings: WebhookSettings, pool: AsyncConnectionPool, client: OrchestratorClient
 ) -> FastAPI:
     app = FastAPI(
@@ -70,7 +72,6 @@ def create_api_app(
         redoc_url=None,
     )
     app.include_router(build_router(settings, pool, client))
-    app.add_middleware(SourceAllowlist, networks=settings.api_networks())
 
     @app.exception_handler(ApiError)
     async def _api_error(request: Request, exc: ApiError) -> JSONResponse:
@@ -110,4 +111,25 @@ def create_api_app(
             return _error(503, "unavailable", "database unavailable")
         return JSONResponse({"status": "ok"})
 
+    return app
+
+
+def create_api_app(
+    settings: WebhookSettings, pool: AsyncConnectionPool, client: OrchestratorClient
+) -> FastAPI:
+    """The UI app: reachable only from the allowed source addresses (the SSO sidecar)."""
+    app = _build_app(settings, pool, client)
+    app.add_middleware(SourceAllowlist, networks=settings.api_networks())
+    return app
+
+
+def create_admin_app(
+    settings: WebhookSettings,
+    pool: AsyncConnectionPool,
+    client: OrchestratorClient,
+    tokens: Iterable[str],
+) -> FastAPI:
+    """The same routes for service callers (the orchestrator relay): a bearer token, no SSO."""
+    app = _build_app(settings, pool, client)
+    app.add_middleware(ServiceTokenGate, tokens=tokens)
     return app
