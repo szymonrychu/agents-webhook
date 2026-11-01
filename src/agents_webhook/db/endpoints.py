@@ -24,7 +24,8 @@ USERNAME_MAX = 64
 
 _COLUMNS = (
     "id, suffix, type, preset_id, prompt_template, username, created_at, "
-    "credentials_rotated_at, filters"
+    "credentials_rotated_at, filters, auth_mode, auth_header, hmac_algorithm, hmac_prefix, "
+    "hmac_timestamp_header, updated_at, secret_ct IS NOT NULL AS has_secret"
 )
 
 
@@ -35,10 +36,17 @@ class Endpoint:
     type: str
     preset_id: str
     prompt_template: str | None
-    username: str
+    username: str | None
     created_at: datetime
     credentials_rotated_at: datetime | None
     filters: dict
+    auth_mode: str
+    auth_header: str | None
+    hmac_algorithm: str | None
+    hmac_prefix: str | None
+    hmac_timestamp_header: str | None
+    updated_at: datetime
+    has_secret: bool
 
 
 @dataclass(frozen=True)
@@ -203,7 +211,7 @@ async def authenticate(
         )
         row = await cur.fetchone()
     stored = row[-1] if row is not None and parsed is not None else credentials.DUMMY_HASH
-    expected_username = row[5] if row is not None else ""
+    expected_username = (row[5] or "") if row is not None else ""
     username_ok = hmac.compare_digest(_digest(username), _digest(expected_username))
     password_ok = await asyncio.to_thread(credentials.verify_password, password, stored)
     if row is None or parsed is None or not (username_ok and password_ok):

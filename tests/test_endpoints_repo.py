@@ -505,3 +505,110 @@ async def test_authenticate_failures_unchanged_with_filters(conn, verify_spy):
     assert await endpoints.authenticate(conn, ep.suffix, basic("nobody", creds.password)) is None
     assert await endpoints.authenticate(conn, ep.suffix, None) is None
     assert len(verify_spy) == 4
+
+
+# --- auth columns (migration 0006) ------------------------------------------------------------
+
+_COLS = (
+    "(suffix, type, preset_id, username, password_hash, auth_mode, auth_header, "
+    "hmac_algorithm, hmac_prefix, hmac_timestamp_header, secret_ct, secret_kid)"
+)
+
+
+async def _raw(conn, suffix, **kw):
+    row = {
+        "username": None,
+        "password_hash": None,
+        "auth_mode": "header",
+        "auth_header": "X-Gitlab-Token",
+        "hmac_algorithm": None,
+        "hmac_prefix": None,
+        "hmac_timestamp_header": None,
+        "secret_ct": b"ct",
+        "secret_kid": "kid",
+    } | kw
+    await conn.execute(
+        f"INSERT INTO endpoints {_COLS} VALUES (%s, 'github-pr', 'p', %s, %s, %s, %s, %s, %s, %s, "
+        "%s, %s)",
+        (
+            suffix,
+            row["username"],
+            row["password_hash"],
+            row["auth_mode"],
+            row["auth_header"],
+            row["hmac_algorithm"],
+            row["hmac_prefix"],
+            row["hmac_timestamp_header"],
+            row["secret_ct"],
+            row["secret_kid"],
+        ),
+    )
+
+
+async def test_existing_basic_row_survives_and_authenticates(conn):
+    ep, creds = await endpoints.create(
+        conn, EndpointIn(type="github-pr", preset_id="p1"), min_password_length=MIN
+    )
+    assert ep.auth_mode == "basic"
+    assert ep.auth_header is None and ep.hmac_algorithm is None and not ep.has_secret
+    assert ep.updated_at is not None
+    got = await endpoints.authenticate(conn, ep.suffix, basic(creds.username, creds.password))
+    assert got is not None and got.id == ep.id
+
+
+async def test_valid_rows_for_each_mode(conn):
+    await _raw(conn, "h")
+    await _raw(conn, "b", auth_mode="bearer", auth_header=None)
+    await _raw(conn, "m", auth_mode="hmac", hmac_algorithm="sha256", hmac_prefix="sha256=")
+    got = {e.suffix: e for e in await endpoints.list_all(conn)}
+    assert got["h"].auth_mode == "header" and got["h"].has_secret and got["h"].username is None
+    assert got["b"].auth_mode == "bearer" and got["b"].auth_header is None
+    assert got["m"].hmac_prefix == "sha256=" and got["m"].hmac_algorithm == "sha256"
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"auth_mode": "digest"},
+        {"secret_ct": None},  # header without a secret
+        {"secret_kid": None},
+        {"auth_header": None},  # header mode needs the header name
+        {"password_hash": "h"},  # non-basic mode must not keep a hash
+        {"username": "u"},
+        {"hmac_prefix": "x"},  # hmac fields only in hmac mode
+        {"auth_mode": "bearer"},  # bearer takes no header name
+        {"auth_mode": "hmac"},  # hmac needs the algorithm
+        {"auth_mode": "hmac", "hmac_algorithm": "md5"},
+    ],
+)
+async def test_checks_reject_bad_combos(conn, kw):
+    with pytest.raises(psycopg.errors.CheckViolation):
+        await _raw(conn, "x", **kw)
+
+
+async def test_basic_mode_rejects_secret_and_missing_hash(conn):
+    with pytest.raises(psycopg.errors.CheckViolation):
+        await _raw(
+            conn,
+            "x",
+            auth_mode="basic",
+            auth_header=None,
+            username="u",
+            password_hash="h",
+        )
+    with pytest.raises(psycopg.errors.CheckViolation):
+        await _raw(
+            conn,
+            "y",
+            auth_mode="basic",
+            auth_header=None,
+            secret_ct=None,
+            secret_kid=None,
+            username="u",
+        )
+
+
+async def test_updated_at_defaults_now(conn):
+    await _raw(conn, "h")
+    cur = await conn.execute("SELECT updated_at <= now() FROM endpoints WHERE suffix='h'")
+    assert (await cur.fetchone())[0] is True

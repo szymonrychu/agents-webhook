@@ -654,7 +654,7 @@ def test_0005_renames_cluster_columns(empty_db, monkeypatch):
     with psycopg.connect(empty_db, autocommit=True) as c:
         ids = [r[0] for r in c.execute(seed).fetchall()]
 
-    assert migrate.run_migrations(empty_db, "agents_webhook") == ["0005_sessions.sql"]
+    assert migrate.run_migrations(empty_db, "agents_webhook")[0] == "0005_sessions.sql"
 
     with psycopg.connect(empty_db, autocommit=True) as c:
         rows = c.execute("SELECT id, session_id, session_slug FROM events ORDER BY id").fetchall()
