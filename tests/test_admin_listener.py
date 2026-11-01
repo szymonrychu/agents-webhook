@@ -207,3 +207,46 @@ def test_api_without_a_valid_endpoint_key_exits_78(tmp_path, monkeypatch, capsys
     _fake_serving(monkeypatch)
     assert cli.main(["api"]) == 78
     assert "WEBHOOK_ENDPOINT_KEY_FILE" in capsys.readouterr().err
+
+
+async def test_admin_new_routes_behave_like_the_ui_listener(admin, fake):
+    preset = str(fake.add_preset("dev").id)
+    h = bearer(TOKEN)
+    created = await admin.post(
+        f"{P}/endpoints",
+        json={
+            "type": "github-pr",
+            "preset_id": preset,
+            "auth_mode": "header",
+            "auth_header": "X-T",
+        },
+        headers=h,
+    )
+    assert created.status_code == 201 and created.json()["secret"]
+    eid = created.json()["id"]
+    patched = await admin.patch(f"{P}/endpoints/{eid}", json={"suffix": "via-admin"}, headers=h)
+    assert patched.status_code == 200 and patched.json()["suffix"] == "via-admin"
+    assert patched.json()["secret"] is None
+    changed = await admin.patch(f"{P}/endpoints/{eid}", json={"auth_mode": "bearer"}, headers=h)
+    assert changed.status_code == 200 and changed.json()["secret"]
+    assert changed.headers["cache-control"] == "no-store"
+    rotated = await admin.post(f"{P}/endpoints/{eid}/rotate", headers=h)
+    assert rotated.status_code == 200 and rotated.json()["secret"]
+    cloned = await admin.post(f"{P}/endpoints/{eid}/clone", headers=h)
+    assert cloned.status_code == 201 and cloned.json()["secret"]
+    assert cloned.headers["cache-control"] == "no-store"
+    listed = (await admin.get(f"{P}/endpoints", headers=h)).json()
+    assert len(listed) == 2 and all("secret" not in e and e["has_secret"] for e in listed)
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("PATCH", f"{P}/endpoints/1"),
+        ("POST", f"{P}/endpoints/1/clone"),
+        ("POST", f"{P}/endpoints/1/rotate"),
+    ],
+)
+async def test_admin_new_routes_require_the_token(admin, method, path):
+    assert (await admin.request(method, path)).status_code == 401
+    assert (await admin.request(method, path, headers=bearer("wrong"))).status_code == 401

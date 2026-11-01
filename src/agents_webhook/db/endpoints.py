@@ -340,6 +340,9 @@ async def patch(
     for name in fields:
         if name not in PATCHABLE:
             raise ValueError(f"{name}: not editable")
+    for name in ("preset_id", "suffix", "filters", "auth_mode", "username"):
+        if name in fields and fields[name] is None:
+            raise ValueError(f"{name}: cannot be null")
     if "preset_id" in fields and not fields["preset_id"]:
         raise ValueError("preset_id: required")
     try:

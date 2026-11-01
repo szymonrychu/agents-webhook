@@ -23,7 +23,21 @@ class FilterResult(BaseModel):
     reason: str | None
 
 
+AuthMode = Literal["basic", "header", "bearer", "hmac"]
+
+
+def _preset_is_uuid(value: str) -> str:
+    """The orchestrator serves presets by UUID only; anything else is an unknown preset."""
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        raise ValueError(f"unknown preset {value!r}") from None
+    return value
+
+
 class EndpointIn(BaseModel):
+    """`username` and `password` are for basic mode; the other modes get a generated secret."""
+
     type: str
     preset_id: str
     suffix: str | None = None
@@ -31,16 +45,51 @@ class EndpointIn(BaseModel):
     password: str | None = Field(default=None, repr=False)
     prompt_template: str | None = None
     filters: Filters | None = None
+    auth_mode: AuthMode = "basic"
+    auth_header: str | None = None
+    hmac_algorithm: Literal["sha256"] | None = None
+    hmac_prefix: str | None = None
+    hmac_timestamp_header: str | None = None
+
+    _preset = field_validator("preset_id")(_preset_is_uuid)
+
+
+class EndpointPatch(BaseModel):
+    """Every editable field; only the fields sent are changed, null clears a nullable one.
+
+    There is no secret, password or type here (extra fields are refused): a secret is replaced
+    only by rotate, or issued anew by a change of `auth_mode`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    preset_id: str | None = None
+    prompt_template: str | None = None
+    suffix: str | None = None
+    filters: Filters | None = None
+    username: str | None = None
+    auth_mode: AuthMode | None = None
+    auth_header: str | None = None
+    hmac_algorithm: Literal["sha256"] | None = None
+    hmac_prefix: str | None = None
+    hmac_timestamp_header: str | None = None
 
     @field_validator("preset_id")
     @classmethod
-    def _preset_is_uuid(cls, value: str) -> str:
-        """The orchestrator serves presets by UUID only; anything else is an unknown preset."""
-        try:
-            uuid.UUID(value)
-        except ValueError:
-            raise ValueError(f"unknown preset {value!r}") from None
-        return value
+    def _preset(cls, value: str | None) -> str | None:
+        return None if value is None else _preset_is_uuid(value)
+
+
+class CloneIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    suffix: str | None = None
+    preset_id: str | None = None
+
+    @field_validator("preset_id")
+    @classmethod
+    def _preset(cls, value: str | None) -> str | None:
+        return None if value is None else _preset_is_uuid(value)
 
 
 class RotateIn(BaseModel):
@@ -56,15 +105,25 @@ class EndpointView(BaseModel):
     preset_id: str
     prompt_template: str | None
     filters: Filters
-    username: str
+    username: str | None
     created_at: datetime
     credentials_rotated_at: datetime | None
+    auth_mode: AuthMode
+    auth_header: str | None
+    hmac_algorithm: str | None
+    hmac_prefix: str | None
+    hmac_timestamp_header: str | None
+    updated_at: datetime
+    has_secret: bool
 
 
 class EndpointCreated(EndpointView):
-    """The only view that carries a password (create and rotate responses)."""
+    """The only view that carries credentials, shown once: `password` (basic mode) or
+    `secret` (header, bearer, hmac). Create, rotate, clone and a patch that changes the
+    auth mode return it; a patch without a mode change returns both as null."""
 
-    password: str = Field(repr=False)
+    password: str | None = Field(default=None, repr=False)
+    secret: str | None = Field(default=None, repr=False)
 
 
 class EventView(BaseModel):
