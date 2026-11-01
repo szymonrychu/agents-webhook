@@ -34,6 +34,8 @@ Every setting is an environment variable. The first block is read by all subcomm
 | `WEBHOOK_API_ALLOWED_CIDRS` | `127.0.0.1/32` | comma-separated CIDRs the api accepts as direct peer address (403 otherwise, `/healthz` and `/readyz` excepted; `X-Forwarded-For` is never read). The default admits only the oauth2-proxy sidecar |
 | `WEBHOOK_ADMIN_TOKENS_FILE` | empty | file with one service token per line; when set, `api` also serves the same routes on `WEBHOOK_ADMIN_PORT` behind `Authorization: Bearer <token>` (no SSO, no source allowlist; `/healthz` and `/readyz` exempt). Create and rotate responses carry the password, so the caller (the orchestrator relay) must strip it |
 | `WEBHOOK_ADMIN_PORT` | `8001` | port of the admin listener; must differ from `WEBHOOK_HTTP_PORT` |
+| `WEBHOOK_ENDPOINT_KEY_FILE` | empty | file holding the base64 32-byte AES-256-GCM key that encrypts endpoint secrets at rest (a mounted Secret; `api` and `ingest` fail at startup when it is missing or not 32 bytes). Losing it makes encrypted secrets unrecoverable: rotate them |
+| `WEBHOOK_HMAC_REPLAY_SECONDS` | 300 | with an hmac timestamp header, deliveries whose timestamp is further than this from now are refused |
 | `WEBHOOK_TRUSTED_PROXIES` | empty | comma-separated CIDRs whose `X-Forwarded-For` is trusted |
 | `WEBHOOK_MIN_PASSWORD_LENGTH` | 16 | shortest accepted caller-chosen password |
 | `WEBHOOK_TEMPLATE_TIMEOUT_SECONDS` | 2.0 | per-render time limit for prompt templates |
