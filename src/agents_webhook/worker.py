@@ -24,6 +24,10 @@ disappears under a first dispatch fails the row `session_not_found`. A fallback 
 fails records `reuse_fallback` in its reason. An update row still without a message after
 `run_timeout_seconds` (the orchestrator stayed unavailable) fails `timeout`.
 
+A session the orchestrator's usage gate refuses (409 `usage_quota`) is not a failure: the row
+goes back to `new` keeping its FIFO place, held (`not_before`) until the refused window resets
+plus a margin, and is claimed again only then.
+
 An unavailable orchestrator leaves the row as it is for the next tick (logged once per row per
 minute); a 4xx on create or post fails the row with the error code. The service never deletes
 sessions. A lost lock raises `LostLock` out of `run_worker` (the process exits non-zero and the
@@ -48,6 +52,7 @@ from agents_common.orchestrator import (
     OrchestratorClient,
     OrchestratorError,
     OrchestratorUnavailable,
+    UsageQuotaRefused,
 )
 from agents_common.runtime import advisory_singleton
 
@@ -197,6 +202,8 @@ class Worker:
             self._unavailable(("event", event.id), exc)
         except NotFound as exc:  # dispatch already failed the row
             log.warning("event %s: failed: %s", event.id, exc)
+        except UsageQuotaRefused as exc:
+            await self._hold(event, exc)
         except OrchestratorError as exc:
             if not 400 <= exc.status < 500:
                 raise
@@ -204,6 +211,23 @@ class Worker:
             await store.finish(event.id, "failed", exc.code)
         else:
             self._unavailable_logged.pop(("event", event.id), None)
+
+    async def _hold(self, event: events.Event, exc: UsageQuotaRefused) -> None:
+        """Return a row whose session the usage gate refused to `new`, held until the window
+        resets (not an error: nothing is failed and the reason stays as it is)."""
+        until = exc.retry_at(datetime.now(UTC))
+        async with self.pool.connection() as conn:
+            await events.release(conn, event.id, not_before=until)
+        percent = "?" if exc.percent is None else f"{exc.percent:g}"
+        limit = "?" if exc.limit is None else exc.limit
+        log.info(
+            "event %s held until %s: usage_quota %s %s%% >= %s%%",
+            event.id,
+            until.isoformat(timespec="seconds"),
+            exc.metric or "?",
+            percent,
+            limit,
+        )
 
     # --- reuse ------------------------------------------------------------------------------
 

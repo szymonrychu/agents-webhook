@@ -2,6 +2,7 @@ import asyncio
 import dataclasses
 import re
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
@@ -405,6 +406,89 @@ async def test_reuse_release_merges_a_newer_new_row_of_the_key(conn, store, ep):
     assert (gone.status, gone.reason, gone.duplicate_of) == ("ignored", "duplicate", a.id)
 
 
+# --- held events (not_before) --------------------------------------------------------------
+
+
+async def set_not_before(conn, id: int, delta: timedelta) -> None:
+    await conn.execute("UPDATE events SET not_before = now() + %s WHERE id = %s", (delta, id))
+
+
+async def test_release_with_not_before_holds_the_row_and_keeps_its_place(conn, ep):
+    a = await rec(conn, ep, ev("a"))
+    got = await claim(conn)
+    until = datetime.now(UTC) + timedelta(hours=1)
+    assert await events.release(conn, a.id, not_before=until)
+    row = await events.get_event(conn, a.id)
+    assert (row.status, row.seq, row.reason) == ("new", got.event.seq, None)
+    assert row.not_before == until
+    assert row.started_at is None
+
+
+async def test_claim_skips_a_held_row_until_not_before_passes(conn, ep, make_endpoint):
+    other = await make_endpoint()
+    a = await rec(conn, ep, ev("a"))
+    b = await rec(conn, other, ev("b"))
+    assert (await claim(conn)).event.id == a.id
+    assert await events.release(conn, a.id, not_before=datetime.now(UTC) + timedelta(hours=1))
+    assert (await claim(conn)).event.id == b.id
+    assert await claim(conn) is None  # a is held
+    await set_not_before(conn, a.id, timedelta(seconds=-5))
+    got = await claim(conn)
+    assert got.event.id == a.id and got.event.status == "in-progress"
+
+
+async def test_held_row_is_held_again_by_a_second_release(conn, ep):
+    a = await rec(conn, ep, ev("a"))
+    await claim(conn)
+    assert await events.release(conn, a.id, not_before=datetime.now(UTC) + timedelta(minutes=5))
+    await set_not_before(conn, a.id, timedelta(seconds=-5))
+    assert (await claim(conn)).event.id == a.id
+    later = datetime.now(UTC) + timedelta(hours=2)
+    assert await events.release(conn, a.id, not_before=later)
+    row = await events.get_event(conn, a.id)
+    assert row.status == "new" and row.not_before == later
+    assert await claim(conn) is None
+
+
+async def test_plain_release_leaves_not_before_null(conn, ep):
+    a = await rec(conn, ep, ev("a"))
+    await claim(conn)
+    assert await events.release(conn, a.id)
+    assert (await events.get_event(conn, a.id)).not_before is None
+    # a plain release after a hold clears it
+    await set_not_before(conn, a.id, timedelta(seconds=-5))
+    await claim(conn)
+    assert await events.release(conn, a.id)
+    assert (await events.get_event(conn, a.id)).not_before is None
+
+
+async def test_newer_delivery_folds_into_the_held_row_and_keeps_not_before(conn, ep):
+    a = await rec(conn, ep, ev("k", title="old"), {"v": 1})
+    await claim(conn)
+    until = datetime.now(UTC) + timedelta(hours=1)
+    assert await events.release(conn, a.id, not_before=until)
+    newer = await rec(conn, ep, ev("k", title="newer"), {"v": 2})
+    assert newer.status == "ignored" and newer.duplicate_of == a.id
+    row = await events.get_event(conn, a.id)
+    assert (row.status, row.title, row.payload, row.deliveries) == ("new", "newer", {"v": 2}, 2)
+    assert row.not_before == until
+    assert await claim(conn) is None
+
+
+async def test_release_folding_a_newer_row_keeps_the_given_not_before(conn, ep):
+    a = await rec(conn, ep, ev("k", title="old"), {"v": 1})
+    await claim(conn)
+    await rec(conn, ep, ev("k", title="newer"), {"v": 2})
+    until = datetime.now(UTC) + timedelta(hours=1)
+    assert await events.release(conn, a.id, not_before=until)
+    row = await events.get_event(conn, a.id)
+    assert (row.status, row.title, row.not_before) == ("new", "newer", until)
+
+
+def test_pick_filters_on_not_before():
+    assert "not_before" in events._PICK  # complements the behaviour tests above
+
+
 async def test_ignored_endpoint_removed(conn, ep, make_endpoint):
     other = await make_endpoint()
     gone = await rec(conn, ep, ev("k"))
@@ -676,3 +760,27 @@ def test_0005_renames_cluster_columns(empty_db, monkeypatch):
     assert rows == [(ids[0], "c1", "wh-1"), (ids[1], None, None)]
     assert {"session_id", "session_slug"} <= set(columns)
     assert [n for n in columns + names if RETIRED_UNIT in n] == []
+
+
+def test_0007_adds_a_nullable_not_before(empty_db, monkeypatch):
+    # Migrate to 0006 (the live schema before this column) and seed a queued row there.
+    monkeypatch.setattr(migrate, "_NAME", re.compile(r"^000[1-6]_.+\.sql$"))
+    assert migrate.run_migrations(empty_db, "agents_webhook")[-1] == "0006_endpoint_auth.sql"
+    monkeypatch.undo()
+    seed = (
+        "INSERT INTO events (priority, endpoint_suffix, type, source, kind, payload, dedup_key, "
+        "status) VALUES (1, 's', 'github-pr', 'github', 'mr', '{}', 'k1', 'new') RETURNING id"
+    )
+    with psycopg.connect(empty_db, autocommit=True) as c:
+        id = c.execute(seed).fetchone()[0]
+
+    assert migrate.run_migrations(empty_db, "agents_webhook") == ["0007_event_not_before.sql"]
+
+    with psycopg.connect(empty_db, autocommit=True) as c:
+        col = c.execute(
+            "SELECT data_type, is_nullable FROM information_schema.columns "
+            "WHERE table_name = 'events' AND column_name = 'not_before'"
+        ).fetchone()
+        held = c.execute("SELECT not_before FROM events WHERE id = %s", (id,)).fetchone()
+    assert col == ("timestamp with time zone", "YES")
+    assert held == (None,)

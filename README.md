@@ -109,6 +109,10 @@ Each agent preset has a boolean `reuse_running_agent`, off by default. When it i
 - Fallback: when the session is gone, refuses the message, or cancels or fails the message before it is sent, the event falls back once to a new session `wh-<id>` (when the limits allow, else it returns to the queue in its place). If a fallback event then fails, its reason is `reuse_fallback` (for example `reuse_fallback: turn_failed`).
 - With reuse off every event starts a new session. The service never deletes sessions.
 
+## Usage quota holds
+
+When the orchestrator refuses to create a session because a Claude usage window is at or over the preset's `usage_quota` limit (HTTP 409, code `usage_quota`), the event is not failed. It goes back to `new` in its place (same position in the queue, `reason` unchanged) and is held: the worker does not claim it again before the refused window resets (plus a one minute margin; five minutes after the refusal when the orchestrator named no reset time). The hold is the event's `not_before` column. A newer delivery for the same item still replaces the held event (latest wins) and keeps the hold. A refusal that follows the hold holds the event again. Other queued events keep being claimed. The worker logs `event <id> held until <time>: usage_quota <metric> <percent>% >= <limit>%`.
+
 ## Statuses and reasons
 
 An event has one of five statuses: `new` (queued), `in-progress` (claimed, running), `handled` (turn completed or update sent), `ignored` (nothing to do), `failed`. A queued `new` event of an item is replaced by a newer delivery for the same item (latest wins) and the older one becomes `duplicate`.

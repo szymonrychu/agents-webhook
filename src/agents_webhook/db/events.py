@@ -37,7 +37,7 @@ _COLUMNS = (
     "kind, action, repo, number, title, body, comment_body, url, author, actor, labels, payload, "
     "delivery_id, "
     "dedup_key, status, reason, preset_id, prompt_template, update_of, duplicate_of, deliveries, "
-    "session_id, session_slug, message_id, started_at, finished_at, draft, changed"
+    "session_id, session_slug, message_id, started_at, finished_at, draft, changed, not_before"
 )
 # Ignored rows keep at most this much of a payload; only `new` rows keep it whole.
 IGNORED_PAYLOAD_CAP = 4096
@@ -101,6 +101,7 @@ class Event:
     finished_at: datetime | None
     draft: bool
     changed: Any
+    not_before: datetime | None
 
 
 @dataclass(frozen=True)
@@ -262,12 +263,14 @@ async def record(
 
 # --- claim ----------------------------------------------------------------------------------
 
+# A held row (`not_before` in the future, set by a usage-quota refusal) is not claimable.
 # Per-key order: a same-key row in progress without a session, or an update in flight, blocks;
 # without reuse any same-key row in progress blocks. A reuse candidate (reuse endpoint with a
 # prior run) bypasses the caps; any other row needs room under both.
 _PICK = """
 SELECT e.id, e.endpoint_id, now() AS now FROM events e
-WHERE e.status = 'new' AND (e.endpoint_id IS NULL OR (
+WHERE e.status = 'new' AND (e.not_before IS NULL OR e.not_before <= now())
+AND (e.endpoint_id IS NULL OR (
     NOT EXISTS (
         SELECT 1 FROM events b
         WHERE b.endpoint_id = e.endpoint_id AND b.dedup_key = e.dedup_key
@@ -370,8 +373,12 @@ async def _newer_new(conn: psycopg.AsyncConnection, id: int) -> int | None:
     return row[0] if row else None
 
 
-async def release(conn: psycopg.AsyncConnection, id: int) -> bool:
+async def release(
+    conn: psycopg.AsyncConnection, id: int, *, not_before: datetime | None = None
+) -> bool:
     """`in-progress -> new`, keeping `seq` (its FIFO place) and clearing run columns.
+
+    `not_before` holds the row: it is not claimable before then (NULL on a plain release).
 
     A newer `new` row of the key that arrived meanwhile is folded in (latest wins): its fields
     move onto this row and it becomes ignored `duplicate` of it.
@@ -386,7 +393,7 @@ async def release(conn: psycopg.AsyncConnection, id: int) -> bool:
         sets = ", ".join(f"{c} = n.{c}" for c in _LATEST)
         cur = await conn.execute(
             "UPDATE events r SET status = 'new', started_at = NULL, update_of = NULL, "
-            "session_id = NULL, session_slug = NULL, message_id = NULL"
+            "session_id = NULL, session_slug = NULL, message_id = NULL, not_before = %(not_before)s"
             + (
                 f", {sets}, updated_at = now(), deliveries = r.deliveries + n.deliveries "
                 "FROM events n WHERE n.id = %(newer)s AND "
@@ -394,7 +401,7 @@ async def release(conn: psycopg.AsyncConnection, id: int) -> bool:
                 else " WHERE "
             )
             + "r.id = %(id)s AND r.status = 'in-progress'",
-            {"id": id, "newer": newer},
+            {"id": id, "newer": newer, "not_before": not_before},
         )
         if newer is not None:
             await _cap_ignored(conn, newer)
