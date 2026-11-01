@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import psycopg
@@ -403,6 +404,106 @@ async def test_failed_preset_missing(conn, fake, make_endpoint, make_worker):
     assert (r.status, r.reason) == ("failed", "preset_not_found")
     assert r.finished_at is not None
     assert fake.sessions == {}
+
+
+# --- usage quota ----------------------------------------------------------------------------
+
+
+def near(a: datetime | None, b: datetime, seconds: float = 2) -> bool:
+    return a is not None and abs((a - b).total_seconds()) < seconds
+
+
+async def test_usage_quota_refusal_holds_the_event_until_the_window_resets(
+    conn, fake, make_endpoint, make_worker, caplog
+):
+    ep = await make_endpoint()
+    id = await rec(conn, ep)
+    seq = (await row(conn, id)).seq
+    resets = datetime.now(UTC) + timedelta(hours=2)
+    fake.refuse_usage(resets, metric="seven_day", percent=91.0, limit=80)
+    caplog.set_level(logging.INFO, logger="agents_webhook.worker")
+
+    await make_worker().tick()
+
+    r = await row(conn, id)
+    assert (r.status, r.seq, r.reason) == ("new", seq, None)
+    assert near(r.not_before, resets + timedelta(seconds=60))
+    assert fake.sessions == {} and fake.messages == {}
+    assert await statuses(conn, [id]) == ["new"]
+    cur = await conn.execute("SELECT count(*) FROM events WHERE status = 'failed'")
+    assert (await cur.fetchone())[0] == 0
+    held = [m for m in caplog.messages if f"event {id} held until" in m]
+    assert len(held) == 1
+    assert "usage_quota seven_day 91% >= 80%" in held[0]
+
+
+async def test_held_event_is_not_claimed_until_not_before_passes_then_dispatched(
+    conn, fake, make_endpoint, make_worker
+):
+    ep = await make_endpoint()
+    id = await rec(conn, ep)
+    fake.refuse_usage(datetime.now(UTC) + timedelta(hours=2))
+    w = make_worker()
+
+    await w.tick()
+    posts = len(fake.requests)
+    await w.tick()
+    assert (await row(conn, id)).status == "new"
+    assert len(fake.requests) == posts + 1  # only the preset read, no create attempt
+
+    await conn.execute("UPDATE events SET not_before = now() - interval '1 second'")
+    await w.tick()
+    r = await row(conn, id)
+    assert r.status == "in-progress" and r.message_id is not None
+    assert len(fake.sessions) == 1
+
+
+async def test_second_refusal_holds_the_event_again(conn, fake, make_endpoint, make_worker):
+    ep = await make_endpoint()
+    id = await rec(conn, ep)
+    fake.refuse_usage(datetime.now(UTC) + timedelta(minutes=30))
+    w = make_worker()
+    await w.tick()
+    await conn.execute("UPDATE events SET not_before = now() - interval '1 second'")
+    later = datetime.now(UTC) + timedelta(hours=5)
+    fake.refuse_usage(later)
+
+    await w.tick()
+
+    r = await row(conn, id)
+    assert r.status == "new" and r.reason is None
+    assert near(r.not_before, later + timedelta(seconds=60))
+    assert fake.sessions == {}
+
+
+async def test_newer_delivery_folds_into_the_held_event_and_keeps_not_before(
+    conn, fake, make_endpoint, make_worker
+):
+    ep = await make_endpoint()
+    id = await rec(conn, ep)
+    resets = datetime.now(UTC) + timedelta(hours=2)
+    fake.refuse_usage(resets)
+    await make_worker().tick()
+    held_until = (await row(conn, id)).not_before
+
+    newer = await events.record(
+        conn, ep, ev(title="Newer"), PAYLOAD, ignore_reason=None, max_queue=1000
+    )
+
+    assert (newer.status, newer.duplicate_of) == ("ignored", id)
+    r = await row(conn, id)
+    assert (r.status, r.title, r.not_before) == ("new", "Newer", held_until)
+
+
+async def test_plain_release_leaves_not_before_null(conn, fake, switch, make_endpoint, make_worker):
+    ep = await make_endpoint()
+    id = await rec(conn, ep)
+    switch.down = True  # the preset cannot be read: the claimed row is released unchanged
+
+    await make_worker().tick()
+
+    r = await row(conn, id)
+    assert (r.status, r.not_before) == ("new", None)
 
 
 async def test_failed_4xx_on_create_or_post_records_the_code(
