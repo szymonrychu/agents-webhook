@@ -168,3 +168,23 @@ def test_settings_every_bad_variable_named(monkeypatch):
         "WEBHOOK_MAX_IN_PROGRESS",
         "WEBHOOK_ORCHESTRATOR_URL",
     } <= set(exc.value.problems)
+
+
+def test_settings_endpoint_key_and_replay_defaults(base_env):
+    s = load_settings(WebhookSettings)
+    assert s.endpoint_key_file == ""
+    assert s.hmac_replay_seconds == 300
+
+
+def test_settings_endpoint_key_and_replay_env(base_env, monkeypatch):
+    monkeypatch.setenv("WEBHOOK_ENDPOINT_KEY_FILE", "/run/key")
+    monkeypatch.setenv("WEBHOOK_HMAC_REPLAY_SECONDS", "60")
+    s = load_settings(WebhookSettings)
+    assert (s.endpoint_key_file, s.hmac_replay_seconds) == ("/run/key", 60)
+
+
+def test_settings_replay_must_be_positive(base_env, monkeypatch):
+    monkeypatch.setenv("WEBHOOK_HMAC_REPLAY_SECONDS", "0")
+    with pytest.raises(SettingsError) as exc:
+        load_settings(WebhookSettings)
+    assert "WEBHOOK_HMAC_REPLAY_SECONDS" in exc.value.problems

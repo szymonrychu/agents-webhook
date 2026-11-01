@@ -8,6 +8,7 @@ from agents_common.db import open_pool
 from agents_common.fake_orchestrator import FakeOrchestrator
 from agents_common.orchestrator import OrchestratorClient, OrchestratorUnavailable
 from agents_common.runs import marker
+from authhelp import BOX
 from test_worker import Switch, ev, make_settings, messages_of, rec, row, session_of, statuses
 
 from agents_webhook import prompt, worker
@@ -63,7 +64,7 @@ async def make_endpoint(conn, fake):
     async def make(spec: dict | None = None, *, preset_id: str | None = None):
         pid = preset_id or str(fake.add_preset("dev", spec=spec).id)
         ep, _ = await endpoints.create(
-            conn, EndpointIn(type="github-pr", preset_id=pid), min_password_length=16
+            conn, EndpointIn(type="github-pr", preset_id=pid), min_password_length=16, box=BOX
         )
         return ep
 

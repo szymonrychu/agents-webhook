@@ -29,6 +29,9 @@ class WebhookSettings(BaseServiceSettings):
     api_allowed_cidrs: CsvList = ["127.0.0.1/32"]
     admin_port: int = Field(8001, ge=1, le=65535)
     admin_tokens_file: str = ""
+    endpoint_key_file: str = ""
+    hmac_replay_seconds: int = Field(300, ge=1)
+    hmac_max_body_bytes: int = Field(1024 * 1024, ge=1)
 
     @field_validator("public_base_url")
     @classmethod

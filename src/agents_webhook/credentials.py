@@ -34,6 +34,11 @@ def generate_password() -> str:
     return secrets.token_urlsafe(32)
 
 
+def generate_secret() -> str:
+    """A 43-char URL-safe random secret for the header, bearer and hmac modes."""
+    return secrets.token_urlsafe(32)
+
+
 def _scrypt(password: str, salt: bytes, n: int, r: int, p: int) -> bytes:
     return hashlib.scrypt(password.encode(), salt=salt, n=n, r=r, p=p, maxmem=_MAXMEM, dklen=_DKLEN)
 

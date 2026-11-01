@@ -21,6 +21,7 @@ from agents_webhook.db.endpoints import EndpointIn
 from agents_webhook.settings import WebhookSettings
 
 from . import payloads as p
+from .authhelp import BOX, authenticate
 from .test_worker import ev
 
 PW_A, PW_B, PW_C = (secrets.token_urlsafe(24) for _ in range(3))
@@ -79,7 +80,7 @@ def settings() -> WebhookSettings:
 
 @pytest.fixture
 async def api(settings, pool, orch):
-    app = create_api_app(settings, pool, orch)
+    app = create_api_app(settings, pool, orch, BOX)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://api"
     ) as c:
@@ -115,7 +116,7 @@ async def test_endpoints_create_with_user_suffix_and_credentials(api, preset, co
     body = resp.json()
     assert (body["suffix"], body["username"]) == ("my-hook", "bob")
     assert body["password"] == PW_A
-    assert await endpoints.authenticate(conn, "my-hook", _basic("bob", PW_A))
+    assert await authenticate(conn, "my-hook", _basic("bob", PW_A))
 
 
 def _basic(u: str, pw: str) -> str:
@@ -199,7 +200,7 @@ async def test_invalid_orchestrator_down_503(settings, pool, fake):
             raise httpx.ConnectError("down", request=request)
 
     async with OrchestratorClient("http://orch", fake.token, transport=Down()) as orch:
-        app = create_api_app(settings, pool, orch)
+        app = create_api_app(settings, pool, orch, BOX)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://api"
         ) as c:
@@ -241,7 +242,7 @@ async def test_preset_id_validation_and_orchestrator_auth_errors(settings, pool,
     async def post(token: str, preset_id: str) -> httpx.Response:
         transport = ServicePort(fake, sha)
         async with OrchestratorClient("http://orch", token, transport=transport) as orch:
-            app = create_api_app(settings, pool, orch)
+            app = create_api_app(settings, pool, orch, BOX)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://api"
             ) as c:
@@ -276,14 +277,12 @@ async def test_rotate_new_credentials_old_stop_authenticating(api, preset, conn)
     assert new["password"] != created["password"]
     assert new["credentials_rotated_at"] is not None
     assert (
-        await endpoints.authenticate(
+        await authenticate(
             conn, created["suffix"], _basic(created["username"], created["password"])
         )
         is None
     )
-    assert await endpoints.authenticate(
-        conn, created["suffix"], _basic(new["username"], new["password"])
-    )
+    assert await authenticate(conn, created["suffix"], _basic(new["username"], new["password"]))
 
 
 async def test_rotate_given_credentials_and_short_password(api, preset):
@@ -328,7 +327,7 @@ async def test_delete_unknown_404(api):
 
 async def seed(conn, preset, n=5, **kw):
     ep, _ = await endpoints.create(
-        conn, EndpointIn(type="github-pr", preset_id=preset, **kw), min_password_length=16
+        conn, EndpointIn(type="github-pr", preset_id=preset, **kw), min_password_length=16, box=BOX
     )
     ids = []
     for i in range(n):
@@ -644,7 +643,7 @@ async def test_health_and_ready(api):
 
 
 async def test_routes_only_under_prefix_besides_health(settings, pool, orch):
-    app = create_api_app(settings, pool, orch)
+    app = create_api_app(settings, pool, orch, BOX)
     paths = {r.path for r in app.routes if hasattr(r, "path")}
     outside = {x for x in paths if not x.startswith(P) and x not in {"/healthz", "/readyz"}}
     assert outside == set()
@@ -674,3 +673,180 @@ async def test_preview_template_golden_response(api):
     assert code(bad) == "invalid_request"
     assert bad.json()["error"]["message"].startswith("template: ")
     assert "nope" in bad.json()["error"]["message"]
+
+
+# --- auth modes: create, patch, rotate, clone -------------------------------------------------
+
+SECRET_MODES = [
+    ("header", {"auth_header": "X-Gitlab-Token"}),
+    ("bearer", {}),
+    ("hmac", {"auth_header": "X-Hub-Signature-256", "hmac_prefix": "sha256="}),
+]
+
+
+@pytest.mark.parametrize(("mode", "extra"), SECRET_MODES)
+async def test_create_secret_mode_returns_secret_once(api, preset, mode, extra, conn, caplog):
+    caplog.set_level("DEBUG")
+    resp = await create(api, preset, auth_mode=mode, **extra)
+    assert resp.status_code == 201
+    assert resp.headers["cache-control"] == "no-store"
+    body = resp.json()
+    assert body["auth_mode"] == mode and body["has_secret"] is True
+    assert body["password"] is None and body["username"] is None
+    assert len(body["secret"]) == 43
+    # never again: list carries has_secret only, and no log line carries the value
+    listed = (await api.get(f"{P}/endpoints")).json()
+    assert listed[0]["has_secret"] is True and "secret" not in listed[0]
+    assert "password" not in listed[0]
+    assert body["secret"] not in (await api.get(f"{P}/endpoints")).text
+    assert body["secret"] not in caplog.text
+    cur = await conn.execute("SELECT secret_ct FROM endpoints WHERE id = %s", (body["id"],))
+    assert body["secret"].encode() not in bytes((await cur.fetchone())[0])
+
+
+async def test_create_basic_default_unchanged(api, preset):
+    body = (await create(api, preset)).json()
+    assert body["auth_mode"] == "basic" and body["has_secret"] is False
+    assert body["password"] and body["secret"] is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"auth_mode": "digest"},
+        {"auth_mode": "header"},
+        {"auth_mode": "bearer", "password": "x" * 20},
+        {"auth_mode": "hmac", "auth_header": "X-S", "hmac_algorithm": "md5"},
+        {"auth_mode": "hmac", "auth_header": "bad header"},
+    ],
+)
+async def test_create_invalid_auth_is_422(api, preset, body):
+    resp = await create(api, preset, **body)
+    assert resp.status_code == 422 and code(resp) == "invalid_request"
+    assert (await api.get(f"{P}/endpoints")).json() == []
+
+
+async def test_patch_fields_and_no_secret(api, preset, fake):
+    other = str(fake.add_preset("other").id)
+    created = (await create(api, preset, suffix="orig", auth_mode="bearer")).json()
+    resp = await api.patch(
+        f"{P}/endpoints/{created['id']}",
+        json={
+            "preset_id": other,
+            "prompt_template": "Hi {{ title }}",
+            "suffix": "renamed",
+            "filters": {"deny": [{"field": "author", "values": ["bot"]}]},
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["preset_id"], body["suffix"]) == (other, "renamed")
+    assert body["url"].endswith("/webhook/renamed") and body["filters"]["deny"][0]["values"]
+    assert body["secret"] is None and body["password"] is None
+    assert "no-store" not in resp.headers.get("cache-control", "")
+    assert body["updated_at"] > created["updated_at"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"type": "github-issue"},
+        {"secret": "x" * 30},
+        {"password": "x" * 30},
+        {"suffix": "bad suffix"},
+        {"preset_id": "not-a-uuid"},
+        {"prompt_template": "{% nope %}"},
+        {"filters": {"deny": [{"field": "nope", "values": ["x"]}]}},
+        {"auth_mode": "digest"},
+        {"auth_mode": "header"},
+        {"username": "bob"},  # bearer endpoint
+        {"suffix": None},
+    ],
+)
+async def test_patch_validation_is_422_and_changes_nothing(api, preset, body):
+    created = (await create(api, preset, auth_mode="bearer")).json()
+    resp = await api.patch(f"{P}/endpoints/{created['id']}", json=body)
+    assert resp.status_code == 422, resp.text
+    assert code(resp) in ("invalid_request", "unknown_preset")
+    after = [e for e in (await api.get(f"{P}/endpoints")).json() if e["id"] == created["id"]][0]
+    assert after["updated_at"] == created["updated_at"]
+
+
+async def test_patch_unknown_preset_422_and_missing_404_and_taken_409(api, preset):
+    a = (await create(api, preset, suffix="a", auth_mode="bearer")).json()
+    await create(api, preset, suffix="b")
+    unknown = await api.patch(f"{P}/endpoints/{a['id']}", json={"preset_id": str(uuid.uuid4())})
+    assert unknown.status_code == 422 and code(unknown) == "unknown_preset"
+    taken = await api.patch(f"{P}/endpoints/{a['id']}", json={"suffix": "b"})
+    assert taken.status_code == 409 and code(taken) == "suffix_taken"
+    missing = await api.patch(f"{P}/endpoints/99999", json={"suffix": "zz"})
+    assert missing.status_code == 404 and code(missing) == "not_found"
+
+
+async def test_patch_mode_change_returns_new_secret_once_no_store(api, preset, caplog):
+    caplog.set_level("DEBUG")
+    created = (await create(api, preset, auth_mode="bearer")).json()
+    resp = await api.patch(
+        f"{P}/endpoints/{created['id']}",
+        json={"auth_mode": "header", "auth_header": "X-Gitlab-Token"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
+    body = resp.json()
+    assert body["auth_mode"] == "header" and body["secret"] and body["secret"] != created["secret"]
+    assert body["secret"] not in caplog.text
+    assert body["credentials_rotated_at"] is not None
+    to_basic = (
+        await api.patch(f"{P}/endpoints/{created['id']}", json={"auth_mode": "basic"})
+    ).json()
+    assert to_basic["password"] and to_basic["username"] and to_basic["secret"] is None
+
+
+async def test_rotate_secret_mode(api, preset, caplog):
+    caplog.set_level("DEBUG")
+    created = (await create(api, preset, auth_mode="bearer")).json()
+    resp = await api.post(f"{P}/endpoints/{created['id']}/rotate")
+    assert resp.status_code == 200 and resp.headers["cache-control"] == "no-store"
+    new = resp.json()
+    assert new["secret"] and new["secret"] != created["secret"] and new["password"] is None
+    assert new["secret"] not in caplog.text
+    chosen = await api.post(f"{P}/endpoints/{created['id']}/rotate", json={"password": PW_A})
+    assert chosen.status_code == 422
+
+
+@pytest.mark.parametrize(("mode", "extra"), [("basic", {}), *SECRET_MODES])
+async def test_clone(api, preset, mode, extra, caplog):
+    caplog.set_level("DEBUG")
+    src = (await create(api, preset, auth_mode=mode, prompt_template="T", **extra)).json()
+    resp = await api.post(f"{P}/endpoints/{src['id']}/clone")
+    assert resp.status_code == 201 and resp.headers["cache-control"] == "no-store"
+    body = resp.json()
+    assert body["id"] != src["id"] and body["suffix"] != src["suffix"]
+    assert (body["auth_mode"], body["auth_header"], body["prompt_template"]) == (
+        mode,
+        extra.get("auth_header"),
+        "T",
+    )
+    if mode == "basic":
+        assert body["password"] != src["password"] and body["username"] != src["username"]
+    else:
+        assert body["secret"] and body["secret"] != src["secret"]
+        assert body["secret"] not in caplog.text
+
+
+async def test_clone_overrides_missing_and_conflict(api, preset, fake):
+    other = str(fake.add_preset("other").id)
+    src = (await create(api, preset, suffix="src", auth_mode="bearer")).json()
+    ok = await api.post(
+        f"{P}/endpoints/{src['id']}/clone", json={"suffix": "dup", "preset_id": other}
+    )
+    assert (
+        ok.status_code == 201 and ok.json()["suffix"] == "dup" and ok.json()["preset_id"] == other
+    )
+    taken = await api.post(f"{P}/endpoints/{src['id']}/clone", json={"suffix": "dup"})
+    assert taken.status_code == 409 and code(taken) == "suffix_taken"
+    assert (await api.post(f"{P}/endpoints/9999/clone")).status_code == 404
+    bad = await api.post(f"{P}/endpoints/{src['id']}/clone", json={"preset_id": str(uuid.uuid4())})
+    assert bad.status_code == 422 and code(bad) == "unknown_preset"
+    extra = await api.post(f"{P}/endpoints/{src['id']}/clone", json={"secret": "x" * 30})
+    assert extra.status_code == 422

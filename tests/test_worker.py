@@ -10,6 +10,7 @@ from agents_common.fake_orchestrator import FakeOrchestrator
 from agents_common.orchestrator import OrchestratorClient
 from agents_common.runs import RunStore, marker
 from agents_common.runtime import LostLock
+from authhelp import BOX
 
 from agents_webhook import prompt, worker
 from agents_webhook.db import endpoints, events
@@ -128,6 +129,7 @@ async def make_endpoint(conn, preset):
             conn,
             EndpointIn(type="github-pr", preset_id=preset_id or preset, prompt_template=template),
             min_password_length=16,
+            box=BOX,
         )
         return ep
 

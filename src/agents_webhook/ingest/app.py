@@ -1,8 +1,10 @@
 """The public ingest app (design D3, D4, D12, D18): `POST /webhook/{suffix}` and health.
 
-Per request, in order: the failed-auth limit (429, before any DB or hash work), basic auth
-against the endpoint (401, identical for every failure), the body cap (413, read only after
-auth so an anonymous caller cannot make the pod buffer a body), GitHub `ping` (202 pong),
+Per request, in order: the failed-auth limit (429, before any DB or hash work), the endpoint's
+auth mode (basic, header, bearer or hmac; 401, identical for every failure), the body cap (413,
+read only after auth so an anonymous caller cannot make the pod buffer a body; an hmac endpoint
+must read its body first to verify it, and a body over the cap there is the same 401, since it
+cannot be verified), GitHub `ping` (202 pong),
 JSON (400), normalize, classify and the endpoint's filters (a built-in reason wins; a filter
 miss is stored ignored, `filter_error` when evaluation itself fails), record, NOTIFY,
 202 `{id, status, reason}`. A DB failure is 503 so the forge retries; nothing else is 5xx.
@@ -29,8 +31,10 @@ from starlette.requests import ClientDisconnect
 from agents_webhook import filters
 from agents_webhook.db import endpoints, events
 from agents_webhook.db.endpoints import Endpoint
+from agents_webhook.ingest.auth import AuthRequest, authenticate
 from agents_webhook.ingest.ratelimit import FailureLimiter, client_key, parse_networks
 from agents_webhook.normalize import NormalizedEvent, TypeMismatch, Unsupported, classify, normalize
+from agents_webhook.secrets_box import SecretBox
 from agents_webhook.settings import WebhookSettings
 
 log = logging.getLogger(__name__)
@@ -127,7 +131,9 @@ async def _read_body(request: Request, limit: int) -> bytes:
     return bytes(body)
 
 
-def create_ingest_app(settings: WebhookSettings, pool: AsyncConnectionPool) -> FastAPI:
+def create_ingest_app(
+    settings: WebhookSettings, pool: AsyncConnectionPool, box: SecretBox
+) -> FastAPI:
     limiter = FailureLimiter(settings.auth_failures_per_minute)
     proxies = parse_networks(settings.trusted_proxies)
     app = FastAPI(title="agents-webhook ingest", docs_url=None, redoc_url=None, openapi_url=None)
@@ -159,11 +165,28 @@ def create_ingest_app(settings: WebhookSettings, pool: AsyncConnectionPool) -> F
         if retry is not None:
             log.warning("ingest: too many failed authentications client=%s", client)
             return _error(429, "too_many_requests", {"Retry-After": str(max(1, math.ceil(retry)))})
+        raw: bytes | None = None
         try:
             async with pool.connection() as conn:
-                endpoint = await endpoints.authenticate(
-                    conn, suffix, request.headers.get("authorization")
-                )
+                record = await endpoints.load_for_auth(conn, suffix)
+            if record is None or record.endpoint.auth_mode == "hmac":
+                # The signature covers the raw body, so it is read before auth, with a hard
+                # cap lower than the general one. An unknown suffix reads the same way so the
+                # read does not tell whether a suffix exists. The limiter already ran.
+                try:
+                    raw = await _read_body(
+                        request, min(settings.hmac_max_body_bytes, settings.max_body_bytes)
+                    )
+                except _TooLarge:
+                    raw = None
+                except ClientDisconnect:
+                    return _error(400, "bad_request")
+            endpoint = await authenticate(
+                record,
+                AuthRequest(request.headers, raw),
+                box=box,
+                replay_seconds=settings.hmac_replay_seconds,
+            )
         except _DB_ERRORS as exc:
             log.error("ingest: authenticate failed (%s) client=%s", type(exc).__name__, client)
             return _error(503, "unavailable")
@@ -171,16 +194,19 @@ def create_ingest_app(settings: WebhookSettings, pool: AsyncConnectionPool) -> F
             limiter.record_failure(client)
             log.info("ingest: unauthorized client=%s", client)
             return _error(401, "unauthorized", {"WWW-Authenticate": REALM})
-        return await _deliver(endpoint, request, client)
+        return await _deliver(endpoint, request, client, raw)
 
-    async def _deliver(endpoint: Endpoint, request: Request, client: str) -> Response:
-        try:
-            raw = await _read_body(request, settings.max_body_bytes)
-        except _TooLarge:
-            log.info("ingest: body too large endpoint=%s client=%s", endpoint.id, client)
-            return _error(413, "payload_too_large")
-        except ClientDisconnect:
-            return _error(400, "bad_request")
+    async def _deliver(
+        endpoint: Endpoint, request: Request, client: str, raw: bytes | None
+    ) -> Response:
+        if raw is None:
+            try:
+                raw = await _read_body(request, settings.max_body_bytes)
+            except _TooLarge:
+                log.info("ingest: body too large endpoint=%s client=%s", endpoint.id, client)
+                return _error(413, "payload_too_large")
+            except ClientDisconnect:
+                return _error(400, "bad_request")
         headers = request.headers
         if endpoint.type.startswith("github") and _header(headers, "X-GitHub-Event") == "ping":
             log.info("ingest: ping endpoint=%s client=%s", endpoint.id, client)

@@ -19,6 +19,7 @@ from agents_webhook.db import endpoints, events
 from agents_webhook.db.endpoints import Endpoint, SuffixTaken
 from agents_webhook.ingest.app import async_verdict
 from agents_webhook.normalize import TypeMismatch, Unsupported, normalize
+from agents_webhook.secrets_box import SecretBox
 from agents_webhook.settings import WebhookSettings
 
 log = logging.getLogger(__name__)
@@ -47,7 +48,10 @@ def _invalid(message: str) -> ApiError:
 
 
 def build_router(
-    settings: WebhookSettings, pool: AsyncConnectionPool, client: OrchestratorClient
+    settings: WebhookSettings,
+    pool: AsyncConnectionPool,
+    client: OrchestratorClient,
+    box: SecretBox,
 ) -> APIRouter:
     router = APIRouter(prefix=PREFIX)
 
@@ -70,15 +74,11 @@ def build_router(
         async with pool.connection() as conn:
             return [view(e) for e in await endpoints.list_all(conn)]
 
-    @router.post("/endpoints", status_code=201, response_model=schemas.EndpointCreated)
-    async def create_endpoint(body: schemas.EndpointIn, response: Response) -> dict[str, Any]:
-        check_template(body.prompt_template)
+    async def check_preset(preset_id: str) -> None:
         try:
-            await client.get_preset(body.preset_id)
+            await client.get_preset(preset_id)
         except NotFound as exc:
-            raise ApiError(
-                422, "unknown_preset", f"preset_id: unknown preset {body.preset_id}"
-            ) from exc
+            raise ApiError(422, "unknown_preset", f"preset_id: unknown preset {preset_id}") from exc
         except OrchestratorError as exc:
             if exc.status in (401, 403):
                 log.error("api: orchestrator refused the service token (%s)", exc.status)
@@ -90,19 +90,96 @@ def build_router(
         except OrchestratorUnavailable as exc:
             log.warning("api: orchestrator unavailable (%s)", type(exc).__name__)
             raise ApiError(503, "orchestrator_unavailable", "orchestrator unavailable") from exc
+
+    def issued(endpoint: Endpoint, creds: endpoints.Credentials | None) -> dict[str, Any]:
+        """The view plus the credentials shown once (null when none were issued)."""
+        return {
+            **view(endpoint),
+            "password": creds.password if creds else None,
+            "secret": creds.secret if creds else None,
+        }
+
+    @router.post("/endpoints", status_code=201, response_model=schemas.EndpointCreated)
+    async def create_endpoint(body: schemas.EndpointIn, response: Response) -> dict[str, Any]:
+        check_template(body.prompt_template)
+        await check_preset(body.preset_id)
         data = endpoints.EndpointIn(**body.model_dump())
         try:
             async with pool.connection() as conn:
                 endpoint, creds = await endpoints.create(
-                    conn, data, min_password_length=settings.min_password_length
+                    conn, data, min_password_length=settings.min_password_length, box=box
                 )
         except ValueError as exc:
             raise _invalid(str(exc)) from exc
         except SuffixTaken as exc:
             raise ApiError(409, "suffix_taken", f"suffix: already taken: {exc.suffix}") from exc
         response.headers.update(NO_STORE)
-        log.info("api: endpoint created id=%s type=%s", endpoint.id, endpoint.type)
-        return {**view(endpoint), "password": creds.password}
+        log.info(
+            "api: endpoint created id=%s type=%s mode=%s",
+            endpoint.id,
+            endpoint.type,
+            endpoint.auth_mode,
+        )
+        return issued(endpoint, creds)
+
+    @router.patch("/endpoints/{id}", response_model=schemas.EndpointCreated)
+    async def patch_endpoint(
+        id: int, body: schemas.EndpointPatch, response: Response
+    ) -> dict[str, Any]:
+        fields = {name: getattr(body, name) for name in body.model_fields_set}
+        if body.filters is not None:
+            fields["filters"] = body.filters.model_dump()
+        if fields.get("preset_id") is not None:
+            await check_preset(fields["preset_id"])
+        check_template(fields.get("prompt_template"))
+        try:
+            async with pool.connection() as conn:
+                patched = await endpoints.patch(
+                    conn, id, fields, min_password_length=settings.min_password_length, box=box
+                )
+        except ValueError as exc:
+            raise _invalid(str(exc)) from exc
+        except SuffixTaken as exc:
+            raise ApiError(409, "suffix_taken", f"suffix: already taken: {exc.suffix}") from exc
+        if patched is None:
+            raise ApiError(404, "not_found", "endpoint not found")
+        if patched.credentials is not None:
+            response.headers.update(NO_STORE)
+        log.info(
+            "api: endpoint patched id=%s fields=%s reissued=%s",
+            id,
+            ",".join(sorted(fields)),
+            patched.credentials is not None,
+        )
+        return issued(patched.endpoint, patched.credentials)
+
+    @router.post("/endpoints/{id}/clone", status_code=201, response_model=schemas.EndpointCreated)
+    async def clone_endpoint(
+        id: int, response: Response, body: schemas.CloneIn | None = None
+    ) -> dict[str, Any]:
+        body = body or schemas.CloneIn()
+        if body.preset_id is not None:
+            await check_preset(body.preset_id)
+        try:
+            async with pool.connection() as conn:
+                cloned = await endpoints.clone(
+                    conn,
+                    id,
+                    suffix=body.suffix,
+                    preset_id=body.preset_id,
+                    min_password_length=settings.min_password_length,
+                    box=box,
+                )
+        except ValueError as exc:
+            raise _invalid(str(exc)) from exc
+        except SuffixTaken as exc:
+            raise ApiError(409, "suffix_taken", f"suffix: already taken: {exc.suffix}") from exc
+        if cloned is None:
+            raise ApiError(404, "not_found", "endpoint not found")
+        endpoint, creds = cloned
+        response.headers.update(NO_STORE)
+        log.info("api: endpoint cloned id=%s from=%s mode=%s", endpoint.id, id, endpoint.auth_mode)
+        return issued(endpoint, creds)
 
     @router.put("/endpoints/{id}/filters", response_model=schemas.EndpointView)
     async def put_filters(id: int, body: schemas.Filters) -> dict[str, Any]:
@@ -129,6 +206,7 @@ def build_router(
                     username=body.username,
                     password=body.password,
                     min_password_length=settings.min_password_length,
+                    box=box,
                 )
                 endpoint = await endpoints.get(conn, id) if creds else None
         except ValueError as exc:
@@ -137,7 +215,7 @@ def build_router(
             raise ApiError(404, "not_found", "endpoint not found")
         response.headers.update(NO_STORE)
         log.info("api: endpoint credentials rotated id=%s", id)
-        return {**view(endpoint), "username": creds.username, "password": creds.password}
+        return issued(endpoint, creds)
 
     @router.delete("/endpoints/{id}", status_code=204)
     async def delete_endpoint(id: int) -> Response:

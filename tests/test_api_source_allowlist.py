@@ -21,7 +21,7 @@ def make(cidrs: str | None = None) -> WebhookSettings:
 
 
 def client(settings: WebhookSettings, peer: str) -> httpx.AsyncClient:
-    app = create_api_app(settings, None, None)
+    app = create_api_app(settings, None, None, None)
     transport = httpx.ASGITransport(app=app, client=(peer, 4242))
     return httpx.AsyncClient(transport=transport, base_url="http://api")
 

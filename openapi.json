@@ -1,9 +1,59 @@
 {
   "components": {
     "schemas": {
-      "EndpointCreated": {
-        "description": "The only view that carries a password (create and rotate responses).",
+      "CloneIn": {
+        "additionalProperties": false,
         "properties": {
+          "preset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Id"
+          },
+          "suffix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suffix"
+          }
+        },
+        "title": "CloneIn",
+        "type": "object"
+      },
+      "EndpointCreated": {
+        "description": "The only view that carries credentials, shown once: `password` (basic mode) or\n`secret` (header, bearer, hmac). Create, rotate, clone and a patch that changes the\nauth mode return it; a patch without a mode change returns both as null.",
+        "properties": {
+          "auth_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Header"
+          },
+          "auth_mode": {
+            "enum": [
+              "basic",
+              "header",
+              "bearer",
+              "hmac"
+            ],
+            "title": "Auth Mode",
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -24,13 +74,57 @@
           "filters": {
             "$ref": "#/components/schemas/Filters"
           },
+          "has_secret": {
+            "title": "Has Secret",
+            "type": "boolean"
+          },
+          "hmac_algorithm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hmac Algorithm"
+          },
+          "hmac_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hmac Prefix"
+          },
+          "hmac_timestamp_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hmac Timestamp Header"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
           },
           "password": {
-            "title": "Password",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
           },
           "preset_id": {
             "title": "Preset Id",
@@ -47,6 +141,17 @@
             ],
             "title": "Prompt Template"
           },
+          "secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret"
+          },
           "suffix": {
             "title": "Suffix",
             "type": "string"
@@ -55,13 +160,25 @@
             "title": "Type",
             "type": "string"
           },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
           "url": {
             "title": "Url",
             "type": "string"
           },
           "username": {
-            "title": "Username",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
           }
         },
         "required": [
@@ -75,13 +192,42 @@
           "username",
           "created_at",
           "credentials_rotated_at",
-          "password"
+          "auth_mode",
+          "auth_header",
+          "hmac_algorithm",
+          "hmac_prefix",
+          "hmac_timestamp_header",
+          "updated_at",
+          "has_secret"
         ],
         "title": "EndpointCreated",
         "type": "object"
       },
       "EndpointIn": {
+        "description": "`username` and `password` are for basic mode; the other modes get a generated secret.",
         "properties": {
+          "auth_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Header"
+          },
+          "auth_mode": {
+            "default": "basic",
+            "enum": [
+              "basic",
+              "header",
+              "bearer",
+              "hmac"
+            ],
+            "title": "Auth Mode",
+            "type": "string"
+          },
           "filters": {
             "anyOf": [
               {
@@ -91,6 +237,40 @@
                 "type": "null"
               }
             ]
+          },
+          "hmac_algorithm": {
+            "anyOf": [
+              {
+                "const": "sha256",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hmac Algorithm"
+          },
+          "hmac_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hmac Prefix"
+          },
+          "hmac_timestamp_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hmac Timestamp Header"
           },
           "password": {
             "anyOf": [
@@ -152,8 +332,153 @@
         "title": "EndpointIn",
         "type": "object"
       },
+      "EndpointPatch": {
+        "additionalProperties": false,
+        "description": "Every editable field; only the fields sent are changed, null clears a nullable one.\n\nThere is no secret, password or type here (extra fields are refused): a secret is replaced\nonly by rotate, or issued anew by a change of `auth_mode`.",
+        "properties": {
+          "auth_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Header"
+          },
+          "auth_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "basic",
+                  "header",
+                  "bearer",
+                  "hmac"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Mode"
+          },
+          "filters": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Filters"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hmac_algorithm": {
+            "anyOf": [
+              {
+                "const": "sha256",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hmac Algorithm"
+          },
+          "hmac_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hmac Prefix"
+          },
+          "hmac_timestamp_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hmac Timestamp Header"
+          },
+          "preset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Id"
+          },
+          "prompt_template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Template"
+          },
+          "suffix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suffix"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          }
+        },
+        "title": "EndpointPatch",
+        "type": "object"
+      },
       "EndpointView": {
         "properties": {
+          "auth_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Header"
+          },
+          "auth_mode": {
+            "enum": [
+              "basic",
+              "header",
+              "bearer",
+              "hmac"
+            ],
+            "title": "Auth Mode",
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -173,6 +498,43 @@
           },
           "filters": {
             "$ref": "#/components/schemas/Filters"
+          },
+          "has_secret": {
+            "title": "Has Secret",
+            "type": "boolean"
+          },
+          "hmac_algorithm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hmac Algorithm"
+          },
+          "hmac_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hmac Prefix"
+          },
+          "hmac_timestamp_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hmac Timestamp Header"
           },
           "id": {
             "title": "Id",
@@ -201,13 +563,25 @@
             "title": "Type",
             "type": "string"
           },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
           "url": {
             "title": "Url",
             "type": "string"
           },
           "username": {
-            "title": "Username",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
           }
         },
         "required": [
@@ -220,7 +594,14 @@
           "filters",
           "username",
           "created_at",
-          "credentials_rotated_at"
+          "credentials_rotated_at",
+          "auth_mode",
+          "auth_header",
+          "hmac_algorithm",
+          "hmac_prefix",
+          "hmac_timestamp_header",
+          "updated_at",
+          "has_secret"
         ],
         "title": "EndpointView",
         "type": "object"
@@ -1181,6 +1562,109 @@
           }
         },
         "summary": "Delete Endpoint"
+      },
+      "patch": {
+        "operationId": "patch_endpoint_webhooks_api_v1_endpoints__id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EndpointPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndpointCreated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Endpoint"
+      }
+    },
+    "/webhooks/api/v1/endpoints/{id}/clone": {
+      "post": {
+        "operationId": "clone_endpoint_webhooks_api_v1_endpoints__id__clone_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CloneIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndpointCreated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clone Endpoint"
       }
     },
     "/webhooks/api/v1/endpoints/{id}/filters": {

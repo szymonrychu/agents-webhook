@@ -4,10 +4,12 @@ subprocesses against a Postgres database and a FakeOrchestrator served by uvicor
 import base64
 import contextlib
 import os
+import secrets
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -102,6 +104,9 @@ class Stack:
         self.procs: dict[str, subprocess.Popen] = {}
         self.http = httpx.Client(timeout=30)
         self.preset_id = ""
+        self.key_dir = tempfile.mkdtemp(prefix="e2e-key-")
+        self.key_file = Path(self.key_dir) / "endpoint-key"
+        self.key_file.write_text(base64.b64encode(secrets.token_bytes(32)).decode())
 
     # lifecycle ------------------------------------------------------------------------------
 
@@ -121,6 +126,7 @@ class Stack:
             "WEBHOOK_MAX_IN_PROGRESS": "20",
             "WEBHOOK_MAX_IN_PROGRESS_PER_ENDPOINT": "20",
             "WEBHOOK_AUTH_FAILURES_PER_MINUTE": "1000",
+            "WEBHOOK_ENDPOINT_KEY_FILE": str(self.key_file),
             **self.extra_env,
         }
 
@@ -163,6 +169,7 @@ class Stack:
 
     def stop(self) -> None:
         self.http.close()
+        shutil.rmtree(self.key_dir, ignore_errors=True)
         for proc in self.procs.values():
             proc.terminate()
         for proc in self.procs.values():
