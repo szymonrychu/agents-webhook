@@ -5,8 +5,6 @@ Only a salted scrypt hash of a password is stored, and `Endpoint` never carries 
 """
 
 import asyncio
-import hashlib
-import hmac
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -188,35 +186,31 @@ async def set_filters(conn: psycopg.AsyncConnection, id: int, data: Any) -> Endp
         return await cur.fetchone()
 
 
-def _digest(value: str) -> bytes:
-    # Fixed-length digests, so the constant-time compare does not leak the username length.
-    return hashlib.sha256(value.encode()).digest()
+@dataclass(frozen=True)
+class AuthRecord:
+    """An endpoint with the stored material that proves a request's credentials.
 
-
-async def authenticate(
-    conn: psycopg.AsyncConnection, suffix: str, authorization: str | None
-) -> Endpoint | None:
-    """The endpoint when `authorization` carries its basic-auth credentials, else None.
-
-    Every failure (unknown suffix, malformed or missing header, wrong username or password)
-    takes the same path: one username compare and one scrypt verify, against `DUMMY_HASH`
-    when there is no endpoint or no parsable header, so failures cannot be told apart.
+    Read only by ingest, through `load_for_auth`; `Endpoint` never carries these.
     """
-    parsed = credentials.parse_basic(authorization)
-    username, password = parsed if parsed is not None else ("", "")
-    row = None
-    if SUFFIX_RE.fullmatch(suffix):
-        cur = await conn.execute(
-            f"SELECT {_COLUMNS}, password_hash FROM endpoints WHERE suffix = %s", (suffix,)
-        )
-        row = await cur.fetchone()
-    stored = row[-1] if row is not None and parsed is not None else credentials.DUMMY_HASH
-    expected_username = (row[5] or "") if row is not None else ""
-    username_ok = hmac.compare_digest(_digest(username), _digest(expected_username))
-    password_ok = await asyncio.to_thread(credentials.verify_password, password, stored)
-    if row is None or parsed is None or not (username_ok and password_ok):
+
+    endpoint: Endpoint
+    password_hash: str | None = field(repr=False)
+    secret_ct: bytes | None = field(repr=False)
+    secret_kid: str | None = field(repr=False)
+
+
+async def load_for_auth(conn: psycopg.AsyncConnection, suffix: str) -> AuthRecord | None:
+    """The endpoint and its stored credential material for `suffix`; None when unknown."""
+    if not SUFFIX_RE.fullmatch(suffix):
         return None
-    return Endpoint(*row[:-1])
+    cur = await conn.execute(
+        f"SELECT {_COLUMNS}, password_hash, secret_ct, secret_kid FROM endpoints WHERE suffix = %s",
+        (suffix,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return AuthRecord(Endpoint(*row[:-3]), row[-3], bytes(row[-2]) if row[-2] else None, row[-1])
 
 
 async def get(conn: psycopg.AsyncConnection, id: int) -> Endpoint | None:

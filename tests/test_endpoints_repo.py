@@ -9,6 +9,8 @@ from agents_webhook import credentials, filters
 from agents_webhook.db import endpoints
 from agents_webhook.db.endpoints import Credentials, EndpointIn, SuffixTaken
 
+from .authhelp import authenticate
+
 TYPES = ["grafana-alert", "gitlab-issue", "gitlab-mr", "github-issue", "github-pr"]
 MIN = 16
 URLSAFE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -89,7 +91,7 @@ async def test_create_user_suffix_and_credentials_stored(conn):
     assert ep.prompt_template == "Alert: {{ title }}"
     assert await endpoints.get(conn, ep.id) == ep
     assert await endpoints.get_by_suffix(conn, "my.hook_~-1") == ep
-    assert await endpoints.authenticate(conn, ep.suffix, basic("grafana", "x" * MIN)) == ep
+    assert await authenticate(conn, ep.suffix, basic("grafana", "x" * MIN)) == ep
 
 
 async def test_create_taken_suffix(conn):
@@ -311,36 +313,36 @@ async def endpoint(conn):
 async def test_authenticate_success_only_with_all_three(conn, endpoint, verify_spy):
     ep, creds = endpoint
     stored = await _stored_hash(conn, ep.id)
-    assert await endpoints.authenticate(conn, "hook", basic("alice", creds.password)) == ep
+    assert await authenticate(conn, "hook", basic("alice", creds.password)) == ep
     assert verify_spy == [(creds.password, stored)]
 
 
 async def test_authenticate_unknown_suffix_uses_dummy_hash(conn, endpoint, verify_spy):
     _, creds = endpoint
-    assert await endpoints.authenticate(conn, "other", basic("alice", creds.password)) is None
+    assert await authenticate(conn, "other", basic("alice", creds.password)) is None
     assert verify_spy == [(creds.password, credentials.DUMMY_HASH)]
 
 
 async def test_authenticate_invalid_suffix_chars_uses_dummy_hash(conn, endpoint, verify_spy):
     _, creds = endpoint
-    assert await endpoints.authenticate(conn, "ho\x00ok", basic("alice", creds.password)) is None
+    assert await authenticate(conn, "ho\x00ok", basic("alice", creds.password)) is None
     assert verify_spy == [(creds.password, credentials.DUMMY_HASH)]
 
 
 async def test_authenticate_wrong_username(conn, endpoint, verify_spy):
     _, creds = endpoint
-    assert await endpoints.authenticate(conn, "hook", basic("bob", creds.password)) is None
+    assert await authenticate(conn, "hook", basic("bob", creds.password)) is None
     assert len(verify_spy) == 1
 
 
 async def test_authenticate_wrong_password(conn, endpoint, verify_spy):
-    assert await endpoints.authenticate(conn, "hook", basic("alice", "w" * 43)) is None
+    assert await authenticate(conn, "hook", basic("alice", "w" * 43)) is None
     assert len(verify_spy) == 1
 
 
 @pytest.mark.parametrize("header", [None, "", "Bearer x", "Basic ???", "Basic " + "YWJj"])
 async def test_authenticate_malformed_header_uses_dummy_hash(conn, endpoint, verify_spy, header):
-    assert await endpoints.authenticate(conn, "hook", header) is None
+    assert await authenticate(conn, "hook", header) is None
     assert len(verify_spy) == 1
     assert verify_spy[0][1] == credentials.DUMMY_HASH
 
@@ -348,7 +350,7 @@ async def test_authenticate_malformed_header_uses_dummy_hash(conn, endpoint, ver
 async def test_authenticate_deleted_endpoint_uses_dummy_hash(conn, endpoint, verify_spy):
     ep, creds = endpoint
     assert await endpoints.delete(conn, ep.id)
-    assert await endpoints.authenticate(conn, "hook", basic("alice", creds.password)) is None
+    assert await authenticate(conn, "hook", basic("alice", creds.password)) is None
     assert verify_spy == [(creds.password, credentials.DUMMY_HASH)]
 
 
@@ -362,7 +364,7 @@ async def test_authenticate_username_compared_in_constant_time(conn, endpoint, m
         return real(a, b)
 
     monkeypatch.setattr(credentials.hmac, "compare_digest", spy)
-    assert await endpoints.authenticate(conn, "hook", basic("bob", creds.password)) is None
+    assert await authenticate(conn, "hook", basic("bob", creds.password)) is None
     # username compare plus the scrypt digest compare
     assert len(calls) == 2
 
@@ -376,9 +378,9 @@ async def test_rotate_invalidates_old_password(conn, endpoint):
     assert new is not None
     assert new.password != old.password and len(new.password) == 43
     assert re.fullmatch(r"wh-[0-9a-f]{8}", new.username)
-    assert await endpoints.authenticate(conn, "hook", basic(old.username, old.password)) is None
-    assert await endpoints.authenticate(conn, "hook", basic(new.username, old.password)) is None
-    authed = await endpoints.authenticate(conn, "hook", basic(new.username, new.password))
+    assert await authenticate(conn, "hook", basic(old.username, old.password)) is None
+    assert await authenticate(conn, "hook", basic(new.username, old.password)) is None
+    authed = await authenticate(conn, "hook", basic(new.username, new.password))
     assert authed is not None and authed.id == ep.id
     assert authed.username == new.username
     assert authed.credentials_rotated_at is not None
@@ -390,7 +392,7 @@ async def test_rotate_user_supplied_credentials(conn, endpoint):
         conn, ep.id, username="carol", password="c" * MIN, min_password_length=MIN
     )
     assert new == Credentials(username="carol", password="c" * MIN)
-    assert await endpoints.authenticate(conn, "hook", basic("carol", "c" * MIN)) is not None
+    assert await authenticate(conn, "hook", basic("carol", "c" * MIN)) is not None
 
 
 async def test_rotate_missing_endpoint_returns_none(conn):
@@ -453,7 +455,7 @@ async def test_create_stores_filters(conn):
     assert (await endpoints.get(conn, ep.id)).filters == expected
     assert (await endpoints.get_by_suffix(conn, ep.suffix)).filters == expected
     assert (await endpoints.list_all(conn))[0].filters == expected
-    authed = await endpoints.authenticate(conn, ep.suffix, basic(creds.username, creds.password))
+    authed = await authenticate(conn, ep.suffix, basic(creds.username, creds.password))
     assert authed is not None and authed.filters == expected
 
 
@@ -498,12 +500,10 @@ async def test_authenticate_failures_unchanged_with_filters(conn, verify_spy):
         EndpointIn(type="github-pr", preset_id="p", filters=RULES),
         min_password_length=MIN,
     )
-    assert (
-        await endpoints.authenticate(conn, "unknown", basic(creds.username, creds.password)) is None
-    )
-    assert await endpoints.authenticate(conn, ep.suffix, basic(creds.username, "wrong" * 5)) is None
-    assert await endpoints.authenticate(conn, ep.suffix, basic("nobody", creds.password)) is None
-    assert await endpoints.authenticate(conn, ep.suffix, None) is None
+    assert await authenticate(conn, "unknown", basic(creds.username, creds.password)) is None
+    assert await authenticate(conn, ep.suffix, basic(creds.username, "wrong" * 5)) is None
+    assert await authenticate(conn, ep.suffix, basic("nobody", creds.password)) is None
+    assert await authenticate(conn, ep.suffix, None) is None
     assert len(verify_spy) == 4
 
 
@@ -552,7 +552,7 @@ async def test_existing_basic_row_survives_and_authenticates(conn):
     assert ep.auth_mode == "basic"
     assert ep.auth_header is None and ep.hmac_algorithm is None and not ep.has_secret
     assert ep.updated_at is not None
-    got = await endpoints.authenticate(conn, ep.suffix, basic(creds.username, creds.password))
+    got = await authenticate(conn, ep.suffix, basic(creds.username, creds.password))
     assert got is not None and got.id == ep.id
 
 

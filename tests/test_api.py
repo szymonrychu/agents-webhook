@@ -21,6 +21,7 @@ from agents_webhook.db.endpoints import EndpointIn
 from agents_webhook.settings import WebhookSettings
 
 from . import payloads as p
+from .authhelp import authenticate
 from .test_worker import ev
 
 PW_A, PW_B, PW_C = (secrets.token_urlsafe(24) for _ in range(3))
@@ -115,7 +116,7 @@ async def test_endpoints_create_with_user_suffix_and_credentials(api, preset, co
     body = resp.json()
     assert (body["suffix"], body["username"]) == ("my-hook", "bob")
     assert body["password"] == PW_A
-    assert await endpoints.authenticate(conn, "my-hook", _basic("bob", PW_A))
+    assert await authenticate(conn, "my-hook", _basic("bob", PW_A))
 
 
 def _basic(u: str, pw: str) -> str:
@@ -276,14 +277,12 @@ async def test_rotate_new_credentials_old_stop_authenticating(api, preset, conn)
     assert new["password"] != created["password"]
     assert new["credentials_rotated_at"] is not None
     assert (
-        await endpoints.authenticate(
+        await authenticate(
             conn, created["suffix"], _basic(created["username"], created["password"])
         )
         is None
     )
-    assert await endpoints.authenticate(
-        conn, created["suffix"], _basic(new["username"], new["password"])
-    )
+    assert await authenticate(conn, created["suffix"], _basic(new["username"], new["password"]))
 
 
 async def test_rotate_given_credentials_and_short_password(api, preset):

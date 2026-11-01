@@ -19,6 +19,7 @@ from agents_common.settings import SettingsError, load_settings
 from agents_webhook import __version__
 from agents_webhook.api.app import create_admin_app, create_api_app
 from agents_webhook.ingest.app import create_ingest_app
+from agents_webhook.secrets_box import SecretBox, SecretBoxError
 from agents_webhook.settings import LocalSettings, WebhookSettings
 from agents_webhook.worker import run_worker
 
@@ -110,9 +111,9 @@ def _base_config(
     )
 
 
-def build_ingest_config(settings: WebhookSettings, pool) -> uvicorn.Config:
+def build_ingest_config(settings: WebhookSettings, pool, box: SecretBox) -> uvicorn.Config:
     """Public listener: no access log (it would print the suffix), tight connection limits."""
-    app = BodyReadTimeout(create_ingest_app(settings, pool), BODY_READ_TIMEOUT_SECONDS)
+    app = BodyReadTimeout(create_ingest_app(settings, pool, box), BODY_READ_TIMEOUT_SECONDS)
     return _base_config(
         app,
         settings,
@@ -186,8 +187,14 @@ def _cmd_migrate(settings: WebhookSettings) -> int:
 
 
 def _cmd_ingest(settings: WebhookSettings) -> int:
+    try:
+        box = SecretBox.from_file(settings.endpoint_key_file)
+    except SecretBoxError as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_BAD_SETTINGS
+
     async def body(pool, _client, stop):
-        await _serve(build_ingest_config(settings, pool), stop)
+        await _serve(build_ingest_config(settings, pool, box), stop)
 
     return _run(settings, body, client=False)
 

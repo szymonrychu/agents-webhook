@@ -20,6 +20,7 @@ from agents_webhook.ingest.ratelimit import FailureLimiter, client_key
 from agents_webhook.settings import WebhookSettings
 
 from . import payloads as p
+from .authhelp import BOX, make_secret_endpoint
 
 TYPES = ["grafana-alert", "gitlab-issue", "gitlab-mr", "github-issue", "github-pr"]
 MIB = 1024 * 1024
@@ -87,7 +88,7 @@ def settings() -> WebhookSettings:
 
 @pytest.fixture
 def app(settings, pool):
-    return create_ingest_app(settings, pool)
+    return create_ingest_app(settings, pool, BOX)
 
 
 def client_for(app, peer: str = PEER) -> httpx.AsyncClient:
@@ -323,7 +324,7 @@ async def test_filters_skipped_for_type_mismatch(client, conn, make_hook):
 
 
 async def test_accepted_bot_actor_is_self_event(pool, conn, make_hook):
-    app = create_ingest_app(make_settings(bot_logins=["alice"]), pool)
+    app = create_ingest_app(make_settings(bot_logins=["alice"]), pool, BOX)
     hook = await make_hook("github-pr")
     async with client_for(app) as c:
         resp = await post(c, hook, p.gh_headers("pull_request"), p.gh_pull_request())
@@ -548,7 +549,7 @@ async def test_too_large_cap_is_inclusive(pool, conn, make_hook):
     hook = await make_hook("grafana-alert")
     raw = json.dumps(p.grafana_alert()).encode()
     padded = raw[:-1] + b" " * 50 + b"}"
-    app = create_ingest_app(make_settings(max_body_bytes=len(padded)), pool)
+    app = create_ingest_app(make_settings(max_body_bytes=len(padded)), pool, BOX)
     async with client_for(app) as c:
         exact = await c.post(hook.url, content=padded, headers={"Authorization": hook.auth})
         over = await c.post(hook.url, content=padded + b" ", headers={"Authorization": hook.auth})
@@ -562,13 +563,13 @@ async def test_too_large_cap_is_inclusive(pool, conn, make_hook):
 @pytest.fixture
 def auth_spy(monkeypatch):
     calls: list[str] = []
-    real = ingest_app.endpoints.authenticate
+    real = ingest_app.endpoints.load_for_auth
 
-    async def spy(conn, suffix, authorization):
+    async def spy(conn, suffix):
         calls.append(suffix)
-        return await real(conn, suffix, authorization)
+        return await real(conn, suffix)
 
-    monkeypatch.setattr(ingest_app.endpoints, "authenticate", spy)
+    monkeypatch.setattr(ingest_app.endpoints, "load_for_auth", spy)
     return calls
 
 
@@ -595,7 +596,7 @@ async def test_limit_eleventh_failed_attempt_is_429_other_client_401(app, make_h
 
 
 async def test_limit_forwarded_for_only_from_trusted_proxy(pool, make_hook):
-    app = create_ingest_app(make_settings(trusted_proxies=["10.0.0.0/8"]), pool)
+    app = create_ingest_app(make_settings(trusted_proxies=["10.0.0.0/8"]), pool, BOX)
     hook = await make_hook("github-pr")
     headers, payload = ACCEPTED["github-pr"]
     wrong = basic(hook.endpoint.username, "wrong-password-123")
@@ -726,7 +727,7 @@ async def test_unavailable_record_conflict_is_503(client, make_hook, monkeypatch
 async def test_unavailable_db_down_503_and_not_ready(db, settings, make_hook):
     hook = await make_hook("github-pr")
     pool = await open_pool(db, max_size=2)
-    app = create_ingest_app(settings, pool)
+    app = create_ingest_app(settings, pool, BOX)
     await pool.close()
     async with client_for(app) as c:
         resp = await post(c, hook, *ACCEPTED["github-pr"])
@@ -792,3 +793,155 @@ async def test_request_timeout_body_shape():
     assert json.loads(sent[1]["body"]) == {
         "error": {"code": "request_timeout", "message": "request timeout"}
     }
+
+
+# --- header, bearer and hmac modes ------------------------------------------------------------
+
+
+def _sign(secret: str, body: bytes, ts: str | None = None) -> str:
+    import hashlib
+    import hmac
+
+    message = (ts.encode() + b":" if ts is not None else b"") + body
+    return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
+
+
+async def _send(client, suffix, headers, body):
+    return await client.post(f"/webhook/{suffix}", content=body, headers=headers)
+
+
+async def test_header_mode_accepts_gitlab_token_and_stores_event(client, conn):
+    ep, secret = await make_secret_endpoint(
+        conn, mode="header", auth_header="X-Gitlab-Token", type_="gitlab-mr"
+    )
+    headers, payload = ACCEPTED["gitlab-mr"]
+    body = json.dumps(payload).encode()
+    ok = await _send(client, ep.suffix, {**headers, "X-Gitlab-Token": secret}, body)
+    assert ok.status_code == 202 and ok.json()["status"] == "new"
+    assert len(await event_rows(conn)) == 1
+    bad = await _send(client, ep.suffix, {**headers, "X-Gitlab-Token": secret + "x"}, body)
+    assert bad.status_code == 401
+
+
+async def test_bearer_mode_accepts_bearer(client, conn):
+    ep, secret = await make_secret_endpoint(conn, mode="bearer", type_="grafana-alert")
+    body = json.dumps(ACCEPTED["grafana-alert"][1]).encode()
+    ok = await _send(client, ep.suffix, {"Authorization": f"bearer {secret}"}, body)
+    assert ok.status_code == 202
+    assert (await _send(client, ep.suffix, {"Authorization": secret}, body)).status_code == 401
+
+
+async def test_hmac_mode_verifies_raw_body_bytes(client, conn):
+    ep, secret = await make_secret_endpoint(
+        conn, mode="hmac", auth_header="X-Hub-Signature-256", hmac_prefix="sha256="
+    )
+    headers, payload = ACCEPTED["github-pr"]
+    body = json.dumps(payload, indent=3).encode()  # whatever bytes the sender used
+    sig = {"X-Hub-Signature-256": "sha256=" + _sign(secret, body)}
+    ok = await _send(client, ep.suffix, {**headers, **sig}, body)
+    assert ok.status_code == 202 and ok.json()["status"] == "new"
+    reencoded = json.dumps(payload).encode()
+    assert (await _send(client, ep.suffix, {**headers, **sig}, reencoded)).status_code == 401
+
+
+async def test_hmac_timestamp_replay_window_over_http(client, conn):
+    import time
+
+    ep, secret = await make_secret_endpoint(
+        conn, mode="hmac", auth_header="X-Sig", timestamp_header="X-Ts", type_="grafana-alert"
+    )
+    body = json.dumps(ACCEPTED["grafana-alert"][1]).encode()
+
+    def hdrs(ts: int) -> dict[str, str]:
+        return {"X-Sig": _sign(secret, body, str(ts)), "X-Ts": str(ts)}
+
+    now = int(time.time())
+    assert (await _send(client, ep.suffix, hdrs(now), body)).status_code == 202
+    assert (await _send(client, ep.suffix, hdrs(now - 3600), body)).status_code == 401
+
+
+async def test_hmac_body_over_cap_is_the_identical_401(pool, conn):
+    app = create_ingest_app(make_settings(max_body_bytes=64), pool, BOX)
+    ep, secret = await make_secret_endpoint(conn, mode="hmac", auth_header="X-Sig")
+    body = b"x" * 200
+    async with client_for(app) as c:
+        resp = await _send(c, ep.suffix, {"X-Sig": _sign(secret, body)}, body)
+        unknown = await _send(c, "no-such-suffix", {"X-Sig": _sign(secret, body)}, body)
+    assert resp.status_code == 401
+    assert (resp.content, resp.headers["www-authenticate"]) == (
+        unknown.content,
+        unknown.headers["www-authenticate"],
+    )
+
+
+async def test_secret_mode_413_only_after_auth(pool, conn):
+    app = create_ingest_app(make_settings(max_body_bytes=64), pool, BOX)
+    ep, secret = await make_secret_endpoint(conn, mode="header", auth_header="X-Tok")
+    body = b"x" * 200
+    async with client_for(app) as c:
+        assert (await _send(c, ep.suffix, {"X-Tok": "wrong"}, body)).status_code == 401
+        assert (await _send(c, ep.suffix, {"X-Tok": secret}, body)).status_code == 413
+
+
+async def test_secret_mode_does_not_read_body_before_auth(client, conn):
+    ep, _ = await make_secret_endpoint(conn, mode="header", auth_header="X-Tok")
+    pulled = 0
+
+    async def body():
+        nonlocal pulled
+        for _ in range(8):
+            pulled += 1
+            yield b"x" * MIB
+
+    resp = await client.post(f"/webhook/{ep.suffix}", content=body(), headers={"X-Tok": "wrong"})
+    assert resp.status_code == 401 and pulled == 0
+
+
+async def test_every_mode_failure_is_the_identical_401(client, conn, make_hook):
+    header_ep, header_secret = await make_secret_endpoint(conn, mode="header", auth_header="X-Tok")
+    bearer_ep, _ = await make_secret_endpoint(conn, mode="bearer")
+    hmac_ep, hmac_secret = await make_secret_endpoint(
+        conn, mode="hmac", auth_header="X-Sig", timestamp_header="X-Ts"
+    )
+    basic_hook = await make_hook("github-pr")
+    body = b"{}"
+    attempts = [
+        ("no-such-suffix", {"X-Tok": header_secret}),
+        (header_ep.suffix, {}),
+        (header_ep.suffix, {"X-Tok": "wrong"}),
+        (bearer_ep.suffix, {"Authorization": "Bearer wrong"}),
+        (hmac_ep.suffix, {"X-Sig": "deadbeef"}),
+        (hmac_ep.suffix, {"X-Sig": _sign(hmac_secret, body, "1"), "X-Ts": "1"}),  # stale
+        (hmac_ep.suffix, {"X-Sig": _sign(hmac_secret, body), "X-Ts": "x"}),
+        (basic_hook.endpoint.suffix, {"Authorization": "Bearer wrong"}),
+    ]
+    seen = set()
+    for suffix, headers in attempts:
+        resp = await _send(client, suffix, headers, body)
+        assert resp.status_code == 401, (suffix, headers)
+        seen.add((resp.content, resp.headers["content-type"], resp.headers["www-authenticate"]))
+    assert len(seen) == 1
+    assert await event_rows(conn) == []
+
+
+async def test_secret_mode_limiter_runs_first_and_counts_failures(app, conn):
+    ep, secret = await make_secret_endpoint(conn, mode="header", auth_header="X-Tok")
+    body = b"{}"
+    async with client_for(app, "198.51.100.30") as attacker:
+        for _ in range(10):
+            assert (await _send(attacker, ep.suffix, {"X-Tok": "no"}, body)).status_code == 401
+        assert (await _send(attacker, ep.suffix, {"X-Tok": secret}, body)).status_code == 429
+
+
+async def test_secret_mode_logs_carry_no_secret_or_signature(client, conn, caplog):
+    caplog.set_level(logging.DEBUG)
+    ep, secret = await make_secret_endpoint(conn, mode="hmac", auth_header="X-Sig")
+    headers, payload = ACCEPTED["github-pr"]
+    body = json.dumps(payload).encode()
+    good = _sign(secret, body)
+    await _send(client, ep.suffix, {**headers, "X-Sig": good}, body)
+    await _send(client, ep.suffix, {**headers, "X-Sig": "BAD-SIG-MARKER"}, body)
+    ours = [r for r in caplog.records if r.name.startswith("agents_webhook")]
+    text = "\n".join(f"{r.getMessage()} {r.args}" for r in ours)
+    for value in (secret, good, "BAD-SIG-MARKER", ep.suffix):
+        assert value not in text

@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import secrets
 import uuid
 
 import psycopg
@@ -18,12 +20,15 @@ ENV = {
 
 
 @pytest.fixture
-def env(monkeypatch):
+def env(monkeypatch, tmp_path):
     for key in list(__import__("os").environ):
         if key.startswith("WEBHOOK_"):
             monkeypatch.delenv(key)
     for key, value in ENV.items():
         monkeypatch.setenv(key, value)
+    key_file = tmp_path / "endpoint-key"
+    key_file.write_text(base64.b64encode(secrets.token_bytes(32)).decode())
+    monkeypatch.setenv("WEBHOOK_ENDPOINT_KEY_FILE", str(key_file))
     return monkeypatch
 
 
@@ -82,7 +87,7 @@ def test_migrate_applies_schema(env, pg_url, caplog):
 
 def test_config_ingest(env):
     settings = cli.load_settings(cli.WebhookSettings)
-    config = cli.build_ingest_config(settings, pool=None)
+    config = cli.build_ingest_config(settings, pool=None, box=None)
     assert config.proxy_headers is False
     assert config.access_log is False
     assert config.timeout_keep_alive == 5
@@ -237,3 +242,21 @@ def test_ingest_still_validates_own_settings(env, capsys):
     err = capsys.readouterr().err
     assert "WEBHOOK_TRUSTED_PROXIES" in err
     assert "ORCHESTRATOR" not in err
+
+
+@pytest.mark.parametrize("content", [None, "not base64 !!", base64.b64encode(b"short").decode()])
+def test_ingest_fails_fast_on_missing_or_bad_endpoint_key(env, capsys, tmp_path, content):
+    if content is None:
+        env.setenv("WEBHOOK_ENDPOINT_KEY_FILE", str(tmp_path / "absent"))
+    else:
+        bad = tmp_path / "bad"
+        bad.write_text(content)
+        env.setenv("WEBHOOK_ENDPOINT_KEY_FILE", str(bad))
+    assert main(["ingest"]) == 78
+    assert "WEBHOOK_ENDPOINT_KEY_FILE" in capsys.readouterr().err
+
+
+def test_ingest_fails_fast_when_endpoint_key_unset(env, capsys):
+    env.delenv("WEBHOOK_ENDPOINT_KEY_FILE")
+    assert main(["ingest"]) == 78
+    assert "WEBHOOK_ENDPOINT_KEY_FILE" in capsys.readouterr().err
