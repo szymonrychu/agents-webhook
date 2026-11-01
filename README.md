@@ -36,6 +36,7 @@ Every setting is an environment variable. The first block is read by all subcomm
 | `WEBHOOK_ADMIN_PORT` | `8001` | port of the admin listener; must differ from `WEBHOOK_HTTP_PORT` |
 | `WEBHOOK_ENDPOINT_KEY_FILE` | empty | file holding the base64 32-byte AES-256-GCM key that encrypts endpoint secrets at rest (a mounted Secret; `api` and `ingest` fail at startup when it is missing or not 32 bytes). Losing it makes encrypted secrets unrecoverable: rotate them |
 | `WEBHOOK_HMAC_REPLAY_SECONDS` | 300 | with an hmac timestamp header, deliveries whose timestamp is further than this from now are refused |
+| `WEBHOOK_HMAC_MAX_BODY_BYTES` | 1048576 (1 MiB) | largest body read before authentication (hmac endpoints and unknown suffixes, never above `WEBHOOK_MAX_BODY_BYTES`); a larger body is an authentication failure (same 401, counted by the failure limiter) |
 | `WEBHOOK_TRUSTED_PROXIES` | empty | comma-separated CIDRs whose `X-Forwarded-For` is trusted |
 | `WEBHOOK_MIN_PASSWORD_LENGTH` | 16 | shortest accepted caller-chosen password |
 | `WEBHOOK_TEMPLATE_TIMEOUT_SECONDS` | 2.0 | per-render time limit for prompt templates |
@@ -194,7 +195,7 @@ mise run test:e2e    # end-to-end tests
 |---|---|
 | 202 | accepted or ignored (`{id, status, reason}`); a GitHub `ping` answers `{"status": "pong"}` |
 | 400 | body is not JSON |
-| 401 | unknown suffix or any failed check, in every mode (identical answers, `WWW-Authenticate: Basic`); an hmac body over the cap cannot be verified and is the same 401 |
+| 401 | unknown suffix or any failed check, in every mode (identical answers, `WWW-Authenticate: Basic`); an hmac body over `WEBHOOK_HMAC_MAX_BODY_BYTES` cannot be verified and is the same 401 |
 | 413 | body over `WEBHOOK_MAX_BODY_BYTES` (checked after authentication; hmac endpoints read their body first, see 401) |
 | 429 | too many failed authentications from one client (`Retry-After`) |
 | 503 | the database write failed, so the sender retries |

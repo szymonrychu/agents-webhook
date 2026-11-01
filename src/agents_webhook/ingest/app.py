@@ -169,10 +169,14 @@ def create_ingest_app(
         try:
             async with pool.connection() as conn:
                 record = await endpoints.load_for_auth(conn, suffix)
-            if record is not None and record.endpoint.auth_mode == "hmac":
-                # The signature covers the raw body, so it is read (capped) before auth.
+            if record is None or record.endpoint.auth_mode == "hmac":
+                # The signature covers the raw body, so it is read before auth, with a hard
+                # cap lower than the general one. An unknown suffix reads the same way so the
+                # read does not tell whether a suffix exists. The limiter already ran.
                 try:
-                    raw = await _read_body(request, settings.max_body_bytes)
+                    raw = await _read_body(
+                        request, min(settings.hmac_max_body_bytes, settings.max_body_bytes)
+                    )
                 except _TooLarge:
                     raw = None
                 except ClientDisconnect:

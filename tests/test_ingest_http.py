@@ -945,3 +945,69 @@ async def test_secret_mode_logs_carry_no_secret_or_signature(client, conn, caplo
     text = "\n".join(f"{r.getMessage()} {r.args}" for r in ours)
     for value in (secret, good, "BAD-SIG-MARKER", ep.suffix):
         assert value not in text
+
+
+# --- unauthenticated body buffering is bounded ------------------------------------------------
+
+
+def _counting_body(chunks: int):
+    state = {"pulled": 0}
+
+    async def gen():
+        for _ in range(chunks):
+            state["pulled"] += 1
+            yield b"x" * 65536
+
+    return state, gen()
+
+
+async def test_hmac_reads_stop_at_the_lower_hmac_cap(pool, conn):
+    app = create_ingest_app(
+        make_settings(max_body_bytes=5 * MIB, hmac_max_body_bytes=128 * 1024), pool, BOX
+    )
+    ep, _ = await make_secret_endpoint(conn, mode="hmac", auth_header="X-Sig")
+    state, body = _counting_body(64)  # 4 MiB offered
+    async with client_for(app) as c:
+        resp = await c.post(f"/webhook/{ep.suffix}", content=body, headers={"X-Sig": "no"})
+    assert resp.status_code == 401
+    assert state["pulled"] <= 4  # 128 KiB cap, not the 5 MiB general cap
+
+
+async def test_hmac_body_between_caps_verifies_when_signed(pool, conn):
+    app = create_ingest_app(make_settings(hmac_max_body_bytes=1024), pool, BOX)
+    ep, secret = await make_secret_endpoint(conn, mode="hmac", auth_header="X-Sig")
+    big = b"x" * 2048
+    async with client_for(app) as c:
+        resp = await _send(c, ep.suffix, {"X-Sig": _sign(secret, big)}, big)
+    assert resp.status_code == 401  # over the hmac cap: counted as a failure
+
+
+async def test_unknown_suffix_reads_body_like_hmac_with_same_cap(pool):
+    app = create_ingest_app(make_settings(hmac_max_body_bytes=128 * 1024), pool, BOX)
+    state, body = _counting_body(64)
+    async with client_for(app) as c:
+        resp = await c.post("/webhook/no-such-suffix", content=body)
+    assert resp.status_code == 401 and 1 <= state["pulled"] <= 4
+
+
+async def test_over_limit_source_is_rejected_without_reading(pool, conn):
+    app = create_ingest_app(make_settings(auth_failures_per_minute=1), pool, BOX)
+    ep, _ = await make_secret_endpoint(conn, mode="hmac", auth_header="X-Sig")
+    async with client_for(app, "198.51.100.77") as c:
+        assert (await _send(c, ep.suffix, {"X-Sig": "no"}, b"{}")).status_code == 401
+        state, body = _counting_body(8)
+        resp = await c.post(f"/webhook/{ep.suffix}", content=body)
+    assert resp.status_code == 429 and state["pulled"] == 0
+
+
+async def test_oversize_hmac_counts_toward_the_limiter(pool, conn):
+    app = create_ingest_app(
+        make_settings(hmac_max_body_bytes=64, auth_failures_per_minute=2), pool, BOX
+    )
+    ep, secret = await make_secret_endpoint(conn, mode="hmac", auth_header="X-Sig")
+    big = b"x" * 500
+    async with client_for(app, "198.51.100.78") as c:
+        for _ in range(2):
+            r = await _send(c, ep.suffix, {"X-Sig": _sign(secret, big)}, big)
+            assert r.status_code == 401
+        assert (await _send(c, ep.suffix, {"X-Sig": _sign(secret, big)}, big)).status_code == 429

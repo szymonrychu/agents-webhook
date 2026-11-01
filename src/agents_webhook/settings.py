@@ -31,6 +31,7 @@ class WebhookSettings(BaseServiceSettings):
     admin_tokens_file: str = ""
     endpoint_key_file: str = ""
     hmac_replay_seconds: int = Field(300, ge=1)
+    hmac_max_body_bytes: int = Field(1024 * 1024, ge=1)
 
     @field_validator("public_base_url")
     @classmethod
