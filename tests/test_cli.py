@@ -102,7 +102,7 @@ def test_config_ingest(env):
 
 def test_config_api(env):
     settings = cli.load_settings(cli.WebhookSettings)
-    config = cli.build_api_config(settings, pool=None, client=None)
+    config = cli.build_api_config(settings, pool=None, client=None, box=None)
     assert config.proxy_headers is False
     assert config.host == settings.http_host
     assert config.port == settings.http_port

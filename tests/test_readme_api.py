@@ -43,7 +43,7 @@ def app_routes() -> set[str]:
         orchestrator_url="http://orchestrator",
         orchestrator_token="t",
     )
-    app = create_api_app(settings, None, None)
+    app = create_api_app(settings, None, None, None)
     out = set()
     for path, methods in _walk(app):
         if path.startswith(PREFIX):

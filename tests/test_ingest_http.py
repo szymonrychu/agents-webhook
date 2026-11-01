@@ -114,7 +114,7 @@ class Hook:
 def make_hook(conn):
     async def make(type_: str = "github-pr", preset: str = "p1", **extra: Any) -> Hook:
         ep, creds = await endpoints.create(
-            conn, EndpointIn(type=type_, preset_id=preset, **extra), min_password_length=16
+            conn, EndpointIn(type=type_, preset_id=preset, **extra), min_password_length=16, box=BOX
         )
         return Hook(ep, basic(creds.username, creds.password), creds.password)
 

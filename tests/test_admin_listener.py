@@ -1,5 +1,6 @@
 """The token-gated admin listener: the same CRUD router behind ServiceTokenGate (WH1)."""
 
+import base64
 import secrets
 
 import httpx
@@ -7,6 +8,7 @@ import pytest
 from agents_common.db import open_pool
 from agents_common.fake_orchestrator import FakeOrchestrator
 from agents_common.orchestrator import OrchestratorClient
+from authhelp import BOX
 
 from agents_webhook import cli
 from agents_webhook.api.app import create_admin_app, create_api_app
@@ -50,7 +52,7 @@ async def orch(fake):
 
 @pytest.fixture
 async def admin(pool, orch):
-    app = create_admin_app(make_settings(), pool, orch, [TOKEN, OTHER])
+    app = create_admin_app(make_settings(), pool, orch, BOX, [TOKEN, OTHER])
     # a peer far outside the api allowlist: the admin listener is gated by token, not by CIDR
     transport = httpx.ASGITransport(app=app, client=("10.9.9.9", 4242))
     async with httpx.AsyncClient(transport=transport, base_url="http://admin") as c:
@@ -99,7 +101,7 @@ async def test_admin_crud_and_passwords_in_responses(admin, fake):
 
 
 async def test_ui_app_stays_open_to_localhost_without_token(pool, orch):
-    app = create_api_app(make_settings(), pool, orch)
+    app = create_api_app(make_settings(), pool, orch, BOX)
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 4242))
     async with httpx.AsyncClient(transport=transport, base_url="http://api") as c:
         assert (await c.get(f"{P}/endpoints")).status_code == 200
@@ -114,7 +116,7 @@ def test_admin_settings_defaults():
 
 def test_build_admin_config(monkeypatch):
     settings = make_settings(admin_port=8123)
-    config = cli.build_admin_config(settings, pool=None, client=None, tokens=[TOKEN])
+    config = cli.build_admin_config(settings, pool=None, client=None, box=None, tokens=[TOKEN])
     assert config.port == 8123
     assert config.host == settings.http_host
     assert config.proxy_headers is False
@@ -160,8 +162,11 @@ def _fake_serving(monkeypatch):
     return ports
 
 
-def _env(monkeypatch, **extra):
+def _env(monkeypatch, tmp_path, **extra):
+    key_file = tmp_path / "endpoint-key"
+    key_file.write_text(base64.b64encode(secrets.token_bytes(32)).decode())
     base = {
+        "WEBHOOK_ENDPOINT_KEY_FILE": str(key_file),
         "WEBHOOK_DATABASE_URL": "postgresql://unused",
         "WEBHOOK_ORCHESTRATOR_URL": "http://orch:8001",
         "WEBHOOK_ORCHESTRATOR_TOKEN": "t",
@@ -177,21 +182,28 @@ def _env(monkeypatch, **extra):
 def test_api_serves_both_ports_when_tokens_are_configured(tmp_path, monkeypatch):
     f = tmp_path / "tokens"
     f.write_text(TOKEN + "\n")
-    _env(monkeypatch, WEBHOOK_ADMIN_TOKENS_FILE=str(f))
+    _env(monkeypatch, tmp_path, WEBHOOK_ADMIN_TOKENS_FILE=str(f))
     ports = _fake_serving(monkeypatch)
     assert cli.main(["api"]) == 0
     assert sorted(ports) == [8000, 8001]
 
 
-def test_api_serves_only_the_ui_port_without_tokens(monkeypatch):
-    _env(monkeypatch)
+def test_api_serves_only_the_ui_port_without_tokens(tmp_path, monkeypatch):
+    _env(monkeypatch, tmp_path)
     ports = _fake_serving(monkeypatch)
     assert cli.main(["api"]) == 0
     assert ports == [8000]
 
 
 def test_api_with_unreadable_tokens_file_exits_78(tmp_path, monkeypatch, capsys):
-    _env(monkeypatch, WEBHOOK_ADMIN_TOKENS_FILE=str(tmp_path / "missing"))
+    _env(monkeypatch, tmp_path, WEBHOOK_ADMIN_TOKENS_FILE=str(tmp_path / "missing"))
     _fake_serving(monkeypatch)
     assert cli.main(["api"]) == 78
     assert "WEBHOOK_ADMIN_TOKENS_FILE" in capsys.readouterr().err
+
+
+def test_api_without_a_valid_endpoint_key_exits_78(tmp_path, monkeypatch, capsys):
+    _env(monkeypatch, tmp_path, WEBHOOK_ENDPOINT_KEY_FILE=str(tmp_path / "missing"))
+    _fake_serving(monkeypatch)
+    assert cli.main(["api"]) == 78
+    assert "WEBHOOK_ENDPOINT_KEY_FILE" in capsys.readouterr().err

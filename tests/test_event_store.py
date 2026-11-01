@@ -6,6 +6,7 @@ import uuid
 import psycopg
 import pytest
 from agents_common.db import migrate, open_pool
+from authhelp import BOX
 from psycopg import sql
 
 from agents_webhook.db import endpoints, events
@@ -57,6 +58,7 @@ async def make_endpoint(conn):
             conn,
             EndpointIn(type=type_, preset_id=preset, prompt_template=template),
             min_password_length=16,
+            box=BOX,
         )
         return ep
 
@@ -155,7 +157,7 @@ async def test_redelivery_by_delivery_id_is_ignored_duplicate(conn, ep):
 
 async def _other_endpoint(conn):
     created, _ = await endpoints.create(
-        conn, EndpointIn(type="github-pr", preset_id="p2"), min_password_length=16
+        conn, EndpointIn(type="github-pr", preset_id="p2"), min_password_length=16, box=BOX
     )
     return created
 

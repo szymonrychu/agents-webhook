@@ -16,7 +16,7 @@ def export() -> str:
         orchestrator_url="http://openapi",
         orchestrator_token="openapi",
     )
-    app = create_api_app(settings, None, None)  # type: ignore[arg-type]
+    app = create_api_app(settings, None, None, None)  # type: ignore[arg-type]
     return json.dumps(app.openapi(), indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 

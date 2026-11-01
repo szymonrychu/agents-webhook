@@ -19,6 +19,7 @@ from agents_webhook.db import endpoints, events
 from agents_webhook.db.endpoints import Endpoint, SuffixTaken
 from agents_webhook.ingest.app import async_verdict
 from agents_webhook.normalize import TypeMismatch, Unsupported, normalize
+from agents_webhook.secrets_box import SecretBox
 from agents_webhook.settings import WebhookSettings
 
 log = logging.getLogger(__name__)
@@ -47,7 +48,10 @@ def _invalid(message: str) -> ApiError:
 
 
 def build_router(
-    settings: WebhookSettings, pool: AsyncConnectionPool, client: OrchestratorClient
+    settings: WebhookSettings,
+    pool: AsyncConnectionPool,
+    client: OrchestratorClient,
+    box: SecretBox,
 ) -> APIRouter:
     router = APIRouter(prefix=PREFIX)
 
@@ -94,7 +98,7 @@ def build_router(
         try:
             async with pool.connection() as conn:
                 endpoint, creds = await endpoints.create(
-                    conn, data, min_password_length=settings.min_password_length
+                    conn, data, min_password_length=settings.min_password_length, box=box
                 )
         except ValueError as exc:
             raise _invalid(str(exc)) from exc
@@ -129,6 +133,7 @@ def build_router(
                     username=body.username,
                     password=body.password,
                     min_password_length=settings.min_password_length,
+                    box=box,
                 )
                 endpoint = await endpoints.get(conn, id) if creds else None
         except ValueError as exc:

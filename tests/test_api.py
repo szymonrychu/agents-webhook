@@ -21,7 +21,7 @@ from agents_webhook.db.endpoints import EndpointIn
 from agents_webhook.settings import WebhookSettings
 
 from . import payloads as p
-from .authhelp import authenticate
+from .authhelp import BOX, authenticate
 from .test_worker import ev
 
 PW_A, PW_B, PW_C = (secrets.token_urlsafe(24) for _ in range(3))
@@ -80,7 +80,7 @@ def settings() -> WebhookSettings:
 
 @pytest.fixture
 async def api(settings, pool, orch):
-    app = create_api_app(settings, pool, orch)
+    app = create_api_app(settings, pool, orch, BOX)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://api"
     ) as c:
@@ -200,7 +200,7 @@ async def test_invalid_orchestrator_down_503(settings, pool, fake):
             raise httpx.ConnectError("down", request=request)
 
     async with OrchestratorClient("http://orch", fake.token, transport=Down()) as orch:
-        app = create_api_app(settings, pool, orch)
+        app = create_api_app(settings, pool, orch, BOX)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://api"
         ) as c:
@@ -242,7 +242,7 @@ async def test_preset_id_validation_and_orchestrator_auth_errors(settings, pool,
     async def post(token: str, preset_id: str) -> httpx.Response:
         transport = ServicePort(fake, sha)
         async with OrchestratorClient("http://orch", token, transport=transport) as orch:
-            app = create_api_app(settings, pool, orch)
+            app = create_api_app(settings, pool, orch, BOX)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://api"
             ) as c:
@@ -327,7 +327,7 @@ async def test_delete_unknown_404(api):
 
 async def seed(conn, preset, n=5, **kw):
     ep, _ = await endpoints.create(
-        conn, EndpointIn(type="github-pr", preset_id=preset, **kw), min_password_length=16
+        conn, EndpointIn(type="github-pr", preset_id=preset, **kw), min_password_length=16, box=BOX
     )
     ids = []
     for i in range(n):
@@ -643,7 +643,7 @@ async def test_health_and_ready(api):
 
 
 async def test_routes_only_under_prefix_besides_health(settings, pool, orch):
-    app = create_api_app(settings, pool, orch)
+    app = create_api_app(settings, pool, orch, BOX)
     paths = {r.path for r in app.routes if hasattr(r, "path")}
     outside = {x for x in paths if not x.startswith(P) and x not in {"/healthz", "/readyz"}}
     assert outside == set()
