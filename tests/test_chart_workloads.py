@@ -1,5 +1,6 @@
 """Chart workloads: three Deployments, the secrets split and per-component annotations."""
 
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -11,12 +12,15 @@ import yaml
 CHART = Path(__file__).resolve().parent.parent / "chart" / "agents-webhook"
 
 DB_PASS = "".join(["db", "-", "fixture", "-", "value"])
+# A runtime-generated stand-in for the base64 AES key (the chart only mounts it).
+ENDPOINT_KEY = secrets.token_urlsafe(32)
 TOKEN = "".join(["orch", "-", "fixture", "-", "value"])
 
 BASE = {
     "image": {"tag": "1.2.3"},
     "postgres": {"url": "postgresql://" + "u:" + DB_PASS + "@db:5432/w"},
     "orchestrator": {"url": "http://orch.agents.svc", "token": TOKEN},
+    "endpointKey": ENDPOINT_KEY,
 }
 
 
@@ -123,6 +127,8 @@ def test_secrets_existing_secrets_are_referenced():
     values = {
         "postgres": {"url": "", "existingSecret": "pg", "existingSecretKey": "dsn"},
         "orchestrator": {"token": "", "tokenSecret": {"name": "tk", "key": "t"}},
+        "endpointKey": "",
+        "endpointKeySecret": {"name": "ek", "key": "k"},
     }
     docs = render(values)
     assert not [d for d in docs if d["kind"] == "Secret"]
@@ -139,7 +145,7 @@ def test_secrets_not_in_configmap_and_no_source_secrets():
     assert TOKEN not in blob and DB_PASS not in blob
     assert "WEBHOOK_DATABASE_URL" not in cm["data"]
     stored = {k: v for d in docs if d["kind"] == "Secret" for k, v in d["stringData"].items()}
-    assert set(stored) == {"uri", "token"}
+    assert set(stored) == {"uri", "token", "key"}
     everything = yaml.safe_dump_all(docs)
     assert "sources" not in everything.lower().replace("resources", "")
     for name in env_names_all(docs):
@@ -318,3 +324,62 @@ def test_admin_port_is_configurable():
 
 def test_admin_tokens_secret_name_required_when_admin_keys_set():
     assert "admin.tokensSecret.name" in render_error({**BASE, "admin": {"enabled": True}})
+
+
+# --- endpoint key (encrypts endpoint secrets; ingest verifies, api encrypts) -------------------
+
+KEY_FILE = "/var/run/secrets/endpoint-key/key"
+
+
+def _key_volume(dep: dict) -> dict | None:
+    volumes = dep["spec"]["template"]["spec"]["volumes"]
+    return next((v for v in volumes if v["name"] == "endpoint-key"), None)
+
+
+def test_endpoint_key_mounted_on_ingest_and_api_only():
+    deps = deployments(render())
+    for name in ("ingest", "api"):
+        container = main_container(deps[name])
+        assert env_values(container)["WEBHOOK_ENDPOINT_KEY_FILE"] == KEY_FILE
+        mount = next(m for m in container["volumeMounts"] if m["name"] == "endpoint-key")
+        assert mount["mountPath"] == "/var/run/secrets/endpoint-key" and mount["readOnly"] is True
+        vol = _key_volume(deps[name])
+        assert vol["secret"]["items"] == [{"key": "key", "path": "key"}]
+    worker = main_container(deps["worker"])
+    assert "WEBHOOK_ENDPOINT_KEY_FILE" not in env_names(worker)
+    assert _key_volume(deps["worker"]) is None
+    for dep in deps.values():  # the migrate init container never sees the key
+        init = dep["spec"]["template"]["spec"]["initContainers"][0]
+        assert "WEBHOOK_ENDPOINT_KEY_FILE" not in env_names(init)
+
+
+def test_endpoint_key_secret_rendered_and_never_in_configmap_or_env():
+    docs = render()
+    secret = next(d for d in docs if d["kind"] == "Secret" and "key" in d["stringData"])
+    assert secret["stringData"]["key"] == ENDPOINT_KEY
+    blob = yaml.safe_dump_all([d for d in docs if d["kind"] != "Secret"])
+    assert ENDPOINT_KEY not in blob
+    assert (
+        _key_volume(deployments(docs)["ingest"])["secret"]["secretName"]
+        == (secret["metadata"]["name"])
+    )
+
+
+def test_ingest_still_has_no_orchestrator_token_with_the_key():
+    ingest = main_container(deployments(render())["ingest"])
+    assert "WEBHOOK_ORCHESTRATOR_TOKEN" not in env_names(ingest)
+    assert "WEBHOOK_ENDPOINT_KEY_FILE" in env_names(ingest)
+
+
+def test_endpoint_key_existing_secret_is_referenced():
+    values = {"endpointKey": "", "endpointKeySecret": {"name": "ek", "key": "k"}}
+    docs = render(values)
+    assert not [d for d in docs if d["kind"] == "Secret" and "key" in d["stringData"]]
+    vol = _key_volume(deployments(docs)["api"])
+    assert vol["secret"]["secretName"] == "ek"
+    assert vol["secret"]["items"] == [{"key": "k", "path": "key"}]
+
+
+def test_endpoint_key_missing_fails_clearly():
+    values = {k: v for k, v in BASE.items() if k != "endpointKey"}
+    assert "endpointKey" in render_error(values)

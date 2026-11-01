@@ -98,6 +98,29 @@ token
 {{- end -}}
 {{- end }}
 
+{{/* Name of the Secret holding the endpoint encryption key; fails when none is set. */}}
+{{- define "agents-webhook.endpointKeySecretName" -}}
+{{- $s := .Values.endpointKeySecret -}}
+{{- if and $s $s.name -}}
+{{- $s.name -}}
+{{- else if .Values.endpointKey -}}
+{{- include "agents-webhook.fullname" . }}-endpoint-key
+{{- else -}}
+{{- fail "agents-webhook: the endpoint encryption key is required: set endpointKey or endpointKeySecret.name" -}}
+{{- end -}}
+{{- end }}
+
+{{- define "agents-webhook.endpointKeySecretKey" -}}
+{{- if and .Values.endpointKeySecret .Values.endpointKeySecret.name -}}
+{{- .Values.endpointKeySecret.key | default "key" -}}
+{{- else -}}
+key
+{{- end -}}
+{{- end }}
+
+{{/* Mount point of the endpoint key file (the Secret key is projected to "key"). */}}
+{{- define "agents-webhook.endpointKeyDir" -}}/var/run/secrets/endpoint-key{{- end }}
+
 {{/* Mount point of the admin tokens file (the Secret key is projected to "tokens"). */}}
 {{- define "agents-webhook.adminTokensDir" -}}/var/run/secrets/admin{{- end }}
 
@@ -129,6 +152,10 @@ env:
   - name: WEBHOOK_ADMIN_TOKENS_FILE
     value: {{ printf "%s/tokens" (include "agents-webhook.adminTokensDir" .context) | quote }}
 {{- end }}
+{{- end }}
+{{- if has .component (list "ingest" "api") }}
+  - name: WEBHOOK_ENDPOINT_KEY_FILE
+    value: {{ printf "%s/key" (include "agents-webhook.endpointKeyDir" .context) | quote }}
 {{- end }}
 {{- if has .component (list "api" "worker") }}
   - name: WEBHOOK_ORCHESTRATOR_TOKEN

@@ -90,6 +90,11 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if ne $component "worker" }}
+            - name: endpoint-key
+              mountPath: {{ include "agents-webhook.endpointKeyDir" $ }}
+              readOnly: true
+            {{- end }}
             {{- if and $.Values.admin.enabled (eq $component "api") }}
             - name: admin-tokens
               mountPath: {{ include "agents-webhook.adminTokensDir" $ }}
@@ -98,6 +103,14 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if ne $component "worker" }}
+        - name: endpoint-key
+          secret:
+            secretName: {{ include "agents-webhook.endpointKeySecretName" $ }}
+            items:
+              - key: {{ include "agents-webhook.endpointKeySecretKey" $ }}
+                path: key
+        {{- end }}
         {{- if and $.Values.admin.enabled (eq $component "api") }}
         - name: admin-tokens
           secret:

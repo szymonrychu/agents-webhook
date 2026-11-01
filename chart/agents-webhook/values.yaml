@@ -23,6 +23,15 @@ orchestrator:
     name: ""
     key: token
 
+# Base64 of the 32-byte AES-256-GCM key that encrypts webhook endpoint secrets at rest (mounted
+# as WEBHOOK_ENDPOINT_KEY_FILE on ingest and api, never on the worker). Required: set endpointKey
+# (rendered into a Secret) or endpointKeySecret.name (an existing Secret; wins). Losing the key
+# makes stored secrets unrecoverable: rotate them.
+endpointKey: ""
+endpointKeySecret:
+  name: ""
+  key: key
+
 # Public base URL used to print webhook URLs (WEBHOOK_PUBLIC_BASE_URL).
 publicBaseUrl: https://lab.szymonrichert.pl
 

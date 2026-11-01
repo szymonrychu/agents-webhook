@@ -2,6 +2,7 @@ image:
   tag: "0.1.0"
 postgres:
   url: postgresql://db:5432/webhook
+endpointKey: bGludC1vbmx5LWRvLW5vdC11c2UtYS1yZWFsLWtleSE=
 orchestrator:
   url: http://agents-orchestrator.agents.svc
   token: lint-token
