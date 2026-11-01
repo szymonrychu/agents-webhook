@@ -177,6 +177,8 @@ The chart is published by the `chart-publish` job on every push to `main`, after
 
 ## Development
 
+Run `pre-commit install` once per clone to enable the gitleaks hook.
+
 ```
 mise run install     # uv sync
 mise run test        # unit tests
