@@ -18,6 +18,7 @@ from agents_webhook import filters as filter_engine
 from agents_webhook.api.app import create_api_app
 from agents_webhook.db import endpoints, events
 from agents_webhook.db.endpoints import EndpointIn
+from agents_webhook.schedule_client import ScheduleUnavailable
 from agents_webhook.settings import WebhookSettings
 
 from . import payloads as p
@@ -78,9 +79,29 @@ def settings() -> WebhookSettings:
     return make_settings()
 
 
+class FakeSchedule:
+    """Stands in for ScheduleClient: `known` ids exist, `down` makes every call fail."""
+
+    def __init__(self) -> None:
+        self.known: set[uuid.UUID] = set()
+        self.down = False
+        self.asked: list[uuid.UUID] = []
+
+    async def get_schedule(self, schedule_id: uuid.UUID) -> bool:
+        self.asked.append(schedule_id)
+        if self.down:
+            raise ScheduleUnavailable("down")
+        return schedule_id in self.known
+
+
 @pytest.fixture
-async def api(settings, pool, orch):
-    app = create_api_app(settings, pool, orch, BOX)
+def schedule() -> FakeSchedule:
+    return FakeSchedule()
+
+
+@pytest.fixture
+async def api(settings, pool, orch, schedule):
+    app = create_api_app(settings, pool, orch, BOX, schedule=schedule)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://api"
     ) as c:
@@ -850,3 +871,108 @@ async def test_clone_overrides_missing_and_conflict(api, preset, fake):
     assert bad.status_code == 422 and code(bad) == "unknown_preset"
     extra = await api.post(f"{P}/endpoints/{src['id']}/clone", json={"secret": "x" * 30})
     assert extra.status_code == 422
+
+
+# --- chaining -------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def targets(schedule) -> list[uuid.UUID]:
+    ids = [uuid.uuid4(), uuid.uuid4()]
+    schedule.known.update(ids)
+    return ids
+
+
+async def test_create_with_targets_returns_and_lists_them(api, preset, targets):
+    resp = await create(api, preset, then_schedule_ids=[str(t) for t in targets])
+    assert resp.status_code == 201
+    assert resp.json()["then_schedule_ids"] == [str(t) for t in targets]
+    listed = (await api.get(f"{P}/endpoints")).json()
+    assert listed[0]["then_schedule_ids"] == [str(t) for t in targets]
+
+
+async def test_create_defaults_to_no_targets(api, preset, schedule):
+    resp = await create(api, preset)
+    assert resp.json()["then_schedule_ids"] == [] and schedule.asked == []
+
+
+async def test_create_unknown_target_is_422(api, preset, targets):
+    resp = await create(api, preset, then_schedule_ids=[str(uuid.uuid4())])
+    assert resp.status_code == 422 and code(resp) == "chain_target_unknown"
+
+
+async def test_create_with_schedule_down_is_503(api, preset, targets, schedule):
+    schedule.down = True
+    resp = await create(api, preset, then_schedule_ids=[str(targets[0])])
+    assert resp.status_code == 503 and code(resp) == "schedule_unavailable"
+
+
+async def test_create_with_chaining_unconfigured_is_422(settings, pool, orch, preset):
+    app = create_api_app(settings, pool, orch, BOX)  # no schedule client
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://api"
+    ) as c:
+        resp = await create(c, preset, then_schedule_ids=[str(uuid.uuid4())])
+        assert resp.status_code == 422 and code(resp) == "chaining_unconfigured"
+        assert (await create(c, preset)).status_code == 201  # an empty list needs no schedule
+
+
+async def test_create_more_than_ten_or_duplicate_targets_is_422(api, preset, schedule):
+    many = [uuid.uuid4() for _ in range(11)]
+    schedule.known.update(many)
+    assert (await create(api, preset, then_schedule_ids=[str(t) for t in many])).status_code == 422
+    one = str(many[0])
+    resp = await create(api, preset, then_schedule_ids=[one, one])
+    assert resp.status_code == 422 and code(resp) == "invalid_request"
+
+
+async def test_patch_sets_clears_and_leaves_targets(api, preset, targets):
+    made = (await create(api, preset, then_schedule_ids=[str(targets[0])])).json()
+    url = f"{P}/endpoints/{made['id']}"
+    resp = await api.patch(url, json={"then_schedule_ids": [str(targets[1])]})
+    assert resp.json()["then_schedule_ids"] == [str(targets[1])]
+    resp = await api.patch(url, json={"prompt_template": "x"})
+    assert resp.json()["then_schedule_ids"] == [str(targets[1])]
+    resp = await api.patch(url, json={"then_schedule_ids": None})
+    assert resp.status_code == 200 and resp.json()["then_schedule_ids"] == [str(targets[1])]
+    resp = await api.patch(url, json={"then_schedule_ids": []})
+    assert resp.json()["then_schedule_ids"] == []
+
+
+async def test_patch_validates_targets(api, preset, targets, schedule):
+    made = (await create(api, preset)).json()
+    url = f"{P}/endpoints/{made['id']}"
+    resp = await api.patch(url, json={"then_schedule_ids": [str(uuid.uuid4())]})
+    assert resp.status_code == 422 and code(resp) == "chain_target_unknown"
+    schedule.down = True
+    resp = await api.patch(url, json={"then_schedule_ids": [str(targets[0])]})
+    assert resp.status_code == 503 and code(resp) == "schedule_unavailable"
+    # clearing needs no schedule service
+    assert (await api.patch(url, json={"then_schedule_ids": []})).status_code == 200
+
+
+async def test_patch_unrelated_field_does_not_ask_the_schedule_service(
+    api, preset, targets, schedule
+):
+    made = (await create(api, preset, then_schedule_ids=[str(targets[0])])).json()
+    schedule.asked.clear()
+    schedule.down = True
+    resp = await api.patch(f"{P}/endpoints/{made['id']}", json={"prompt_template": "y"})
+    assert resp.status_code == 200 and schedule.asked == []
+
+
+async def test_clone_copies_the_targets_without_rechecking(api, preset, targets, schedule):
+    made = (await create(api, preset, then_schedule_ids=[str(t) for t in targets])).json()
+    resp = await api.post(f"{P}/endpoints/{made['id']}/clone")
+    assert resp.status_code == 201
+    assert resp.json()["then_schedule_ids"] == [str(t) for t in targets]
+
+
+async def test_event_view_carries_chain_fields(api, conn, preset, targets):
+    made = (await create(api, preset, then_schedule_ids=[str(targets[0])])).json()
+    ep = await endpoints.get(conn, made["id"])
+    recorded = await events.record(conn, ep, ev(), {"n": 1}, ignore_reason=None, max_queue=1000)
+    view = (await api.get(f"{P}/events/{recorded.id}")).json()
+    assert view["then_schedule_ids"] == [str(targets[0])]
+    assert view["chain_status"] == "pending"
+    assert "result_text" not in view

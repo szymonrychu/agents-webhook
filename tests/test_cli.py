@@ -120,7 +120,7 @@ def test_config_worker(env, monkeypatch):
         calls["url"] = url
         return Pool()
 
-    async def fake_run_worker(settings, pool, client, stop):
+    async def fake_run_worker(settings, pool, client, stop, schedule=None):
         calls["worker"] = (settings, pool, client, stop)
 
     monkeypatch.setattr(cli, "open_pool", fake_open_pool)
@@ -260,3 +260,50 @@ def test_ingest_fails_fast_when_endpoint_key_unset(env, capsys):
     env.delenv("WEBHOOK_ENDPOINT_KEY_FILE")
     assert main(["ingest"]) == 78
     assert "WEBHOOK_ENDPOINT_KEY_FILE" in capsys.readouterr().err
+
+
+# --- chaining -------------------------------------------------------------------------------
+
+
+def _fake_worker(env, monkeypatch):
+    calls = {}
+
+    class Pool:
+        async def close(self):
+            pass
+
+    async def fake_open_pool(url, *a, **k):
+        return Pool()
+
+    async def fake_run_worker(settings, pool, client, stop, schedule=None):
+        calls["schedule"] = schedule
+
+    monkeypatch.setattr(cli, "open_pool", fake_open_pool)
+    monkeypatch.setattr(cli, "run_worker", fake_run_worker)
+    return calls
+
+
+def test_worker_without_schedule_settings_has_no_schedule_client(env, monkeypatch):
+    calls = _fake_worker(env, monkeypatch)
+    assert main(["worker"]) == 0
+    assert calls["schedule"] is None
+
+
+def test_worker_with_schedule_settings_gets_a_client(env, monkeypatch, tmp_path):
+    token_file = tmp_path / "sched-token"
+    token_file.write_text("CANARY-schedule-admin-token\n")
+    env.setenv("WEBHOOK_SCHEDULE_URL", "http://agents-schedule-api:8001")
+    env.setenv("WEBHOOK_SCHEDULE_TOKEN_FILE", str(token_file))
+    calls = _fake_worker(env, monkeypatch)
+    assert main(["worker"]) == 0
+    assert calls["schedule"].base_url == "http://agents-schedule-api:8001"
+
+
+@pytest.mark.parametrize("command", ["worker", "api"])
+def test_unreadable_schedule_token_file_exits_78(env, monkeypatch, tmp_path, capsys, command):
+    env.setenv("WEBHOOK_SCHEDULE_URL", "http://agents-schedule-api:8001")
+    env.setenv("WEBHOOK_SCHEDULE_TOKEN_FILE", str(tmp_path / "missing"))
+    _fake_worker(env, monkeypatch)
+    assert main([command]) == 78
+    err = capsys.readouterr().err
+    assert "WEBHOOK_SCHEDULE_TOKEN_FILE" in err

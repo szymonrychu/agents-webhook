@@ -774,7 +774,7 @@ def test_0007_adds_a_nullable_not_before(empty_db, monkeypatch):
     with psycopg.connect(empty_db, autocommit=True) as c:
         id = c.execute(seed).fetchone()[0]
 
-    assert migrate.run_migrations(empty_db, "agents_webhook") == ["0007_event_not_before.sql"]
+    assert migrate.run_migrations(empty_db, "agents_webhook")[0] == "0007_event_not_before.sql"
 
     with psycopg.connect(empty_db, autocommit=True) as c:
         col = c.execute(
@@ -784,3 +784,96 @@ def test_0007_adds_a_nullable_not_before(empty_db, monkeypatch):
         held = c.execute("SELECT not_before FROM events WHERE id = %s", (id,)).fetchone()
     assert col == ("timestamp with time zone", "YES")
     assert held == (None,)
+
+
+# --- chaining (migration 0008) --------------------------------------------------------------
+
+
+def test_0008_adds_chain_columns_and_keeps_rows(empty_db, monkeypatch):
+    monkeypatch.setattr(migrate, "_NAME", re.compile(r"^000[1-7]_.+\.sql$"))
+    assert migrate.run_migrations(empty_db, "agents_webhook")[-1] == "0007_event_not_before.sql"
+    monkeypatch.undo()
+    seed = (
+        "INSERT INTO events (priority, endpoint_suffix, type, source, kind, payload, dedup_key, "
+        "status) VALUES (1, 's', 'github-pr', 'github', 'mr', '{}', 'k1', 'new') RETURNING id"
+    )
+    with psycopg.connect(empty_db, autocommit=True) as c:
+        id = c.execute(seed).fetchone()[0]
+
+    assert migrate.run_migrations(empty_db, "agents_webhook") == ["0008_chain.sql"]
+
+    with psycopg.connect(empty_db, autocommit=True) as c:
+        cols = dict(
+            c.execute(
+                "SELECT table_name || '.' || column_name, is_nullable "
+                "FROM information_schema.columns "
+                "WHERE column_name IN ('then_schedule_ids', 'chain_status', 'result_text')"
+            ).fetchall()
+        )
+        row = c.execute(
+            "SELECT then_schedule_ids, chain_status, result_text FROM events WHERE id = %s", (id,)
+        ).fetchone()
+        index = c.execute(
+            "SELECT indexdef FROM pg_indexes WHERE indexname = 'events_chain_pending_idx'"
+        ).fetchone()
+        with pytest.raises(psycopg.errors.CheckViolation):
+            c.execute("UPDATE events SET chain_status = 'bogus' WHERE id = %s", (id,))
+    assert cols == {
+        "endpoints.then_schedule_ids": "NO",
+        "events.then_schedule_ids": "YES",
+        "events.chain_status": "YES",
+        "events.result_text": "YES",
+    }
+    assert row == (None, None, None)
+    assert "received_at" in index[0] and "pending" in index[0]
+
+
+async def _chain_endpoint(conn, targets):
+    ep, _ = await endpoints.create(
+        conn,
+        EndpointIn(type="github-pr", preset_id="p1", then_schedule_ids=targets),
+        min_password_length=16,
+        box=BOX,
+    )
+    return ep
+
+
+async def test_record_snapshots_targets_and_marks_chain_pending(conn):
+    targets = [uuid.uuid4(), uuid.uuid4()]
+    ep = await _chain_endpoint(conn, targets)
+    recorded = await rec(conn, ep)
+    event = await events.get_event(conn, recorded.id)
+    assert event.then_schedule_ids == targets
+    assert event.chain_status == "pending" and event.result_text is None
+
+
+async def test_record_without_targets_leaves_chain_null(conn):
+    ep = await _chain_endpoint(conn, [])
+    event = await events.get_event(conn, (await rec(conn, ep)).id)
+    assert event.then_schedule_ids is None and event.chain_status is None
+
+
+async def test_snapshot_is_independent_of_later_endpoint_edits(conn):
+    target = uuid.uuid4()
+    ep = await _chain_endpoint(conn, [target])
+    recorded = await rec(conn, ep)
+    await endpoints.patch(conn, ep.id, {"then_schedule_ids": []}, min_password_length=16, box=BOX)
+    assert (await events.get_event(conn, recorded.id)).then_schedule_ids == [target]
+
+
+async def test_chain_pending_lists_only_pending_oldest_first(conn):
+    ep = await _chain_endpoint(conn, [uuid.uuid4()])
+    a = await rec(conn, ep, ev("k/1"))
+    b = await rec(conn, ep, ev("k/2"))
+    assert [e.id for e in await events.chain_pending(conn)] == [a.id, b.id]
+    assert await events.set_chain_status(conn, a.id, "skipped") is True
+    assert await events.set_chain_status(conn, a.id, "fired") is False  # guarded
+    assert [e.id for e in await events.chain_pending(conn)] == [b.id]
+
+
+async def test_finish_stores_result_text_only_when_given(conn, store):
+    ep = await _chain_endpoint(conn, [])
+    first = await rec(conn, ep)
+    await claim(conn)
+    assert await store.finish(first.id, "handled", None, result_text="the end")
+    assert (await events.get_event(conn, first.id)).result_text == "the end"

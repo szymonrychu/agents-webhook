@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import uuid
 from typing import Annotated, Any
 
 from agents_common.orchestrator import (
@@ -19,6 +20,7 @@ from agents_webhook.db import endpoints, events
 from agents_webhook.db.endpoints import Endpoint, SuffixTaken
 from agents_webhook.ingest.app import async_verdict
 from agents_webhook.normalize import TypeMismatch, Unsupported, normalize
+from agents_webhook.schedule_client import ScheduleClient, ScheduleUnavailable
 from agents_webhook.secrets_box import SecretBox
 from agents_webhook.settings import WebhookSettings
 
@@ -52,6 +54,7 @@ def build_router(
     pool: AsyncConnectionPool,
     client: OrchestratorClient,
     box: SecretBox,
+    schedule: ScheduleClient | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix=PREFIX)
 
@@ -91,6 +94,25 @@ def build_router(
             log.warning("api: orchestrator unavailable (%s)", type(exc).__name__)
             raise ApiError(503, "orchestrator_unavailable", "orchestrator unavailable") from exc
 
+    async def check_targets(ids: list[uuid.UUID]) -> None:
+        """Every chain target must exist in agents-schedule; an empty list needs nothing."""
+        if not ids:
+            return
+        if schedule is None:
+            raise ApiError(
+                422, "chaining_unconfigured", "then_schedule_ids: chaining is not configured"
+            )
+        for target in ids:
+            try:
+                known = await schedule.get_schedule(target)
+            except ScheduleUnavailable as exc:
+                log.warning("api: agents-schedule unavailable (%s)", type(exc).__name__)
+                raise ApiError(503, "schedule_unavailable", "agents-schedule unavailable") from exc
+            if not known:
+                raise ApiError(
+                    422, "chain_target_unknown", f"then_schedule_ids: unknown schedule {target}"
+                )
+
     def issued(endpoint: Endpoint, creds: endpoints.Credentials | None) -> dict[str, Any]:
         """The view plus the credentials shown once (null when none were issued)."""
         return {
@@ -103,6 +125,7 @@ def build_router(
     async def create_endpoint(body: schemas.EndpointIn, response: Response) -> dict[str, Any]:
         check_template(body.prompt_template)
         await check_preset(body.preset_id)
+        await check_targets(body.then_schedule_ids)
         data = endpoints.EndpointIn(**body.model_dump())
         try:
             async with pool.connection() as conn:
@@ -129,6 +152,10 @@ def build_router(
         fields = {name: getattr(body, name) for name in body.model_fields_set}
         if body.filters is not None:
             fields["filters"] = body.filters.model_dump()
+        if fields.get("then_schedule_ids") is None:
+            fields.pop("then_schedule_ids", None)  # null: unchanged
+        else:
+            await check_targets(fields["then_schedule_ids"])
         if fields.get("preset_id") is not None:
             await check_preset(fields["preset_id"])
         check_template(fields.get("prompt_template"))

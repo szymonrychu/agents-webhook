@@ -32,8 +32,11 @@ class WebhookSettings(BaseServiceSettings):
     endpoint_key_file: str = ""
     hmac_replay_seconds: int = Field(300, ge=1)
     hmac_max_body_bytes: int = Field(1024 * 1024, ge=1)
+    schedule_url: str = ""
+    schedule_token_file: str = ""
+    chain_max_wait_seconds: int = Field(86400, ge=60, le=604800)
 
-    @field_validator("public_base_url")
+    @field_validator("public_base_url", "schedule_url")
     @classmethod
     def _strip_slash(cls, value: str) -> str:
         return value.rstrip("/")
@@ -55,6 +58,11 @@ class WebhookSettings(BaseServiceSettings):
         if self.admin_tokens_file and self.admin_port == self.http_port:
             raise ValueError("WEBHOOK_ADMIN_PORT::must differ from WEBHOOK_HTTP_PORT")
         return self
+
+    @property
+    def chaining_configured(self) -> bool:
+        """Chaining needs both the agents-schedule URL and its admin token file."""
+        return bool(self.schedule_url and self.schedule_token_file)
 
     def api_networks(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
         return [ipaddress.ip_network(c, strict=False) for c in self.api_allowed_cidrs]

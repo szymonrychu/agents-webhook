@@ -42,7 +42,7 @@ import dataclasses
 import logging
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from agents_common import runs
@@ -58,6 +58,7 @@ from agents_common.runtime import advisory_singleton
 
 from agents_webhook import prompt
 from agents_webhook.db import events
+from agents_webhook.schedule_client import ScheduleClient, ScheduleUnavailable
 from agents_webhook.settings import WebhookSettings
 
 if TYPE_CHECKING:
@@ -100,10 +101,41 @@ class _FallbackStore:
     async def set_message(self, run_id: runs.RunId, message_id: str) -> None:
         await self._store.set_message(run_id, message_id)
 
-    async def finish(self, run_id: runs.RunId, status: runs.RunStatus, reason: str | None) -> bool:
+    async def finish(
+        self,
+        run_id: runs.RunId,
+        status: runs.RunStatus,
+        reason: str | None,
+        *,
+        result_text: str | None = None,
+    ) -> bool:
         if status == "failed":
             reason = f"{REUSE_FALLBACK}: {reason}" if reason else REUSE_FALLBACK
-        return await self._store.finish(run_id, status, reason)
+        return await self._store.finish(run_id, status, reason, result_text=result_text)
+
+
+class _CapturingStore:
+    """A run store that stores the final text of the polled turn with the `handled` transition.
+
+    `recording` is the `RecordingClient` the tracker polled through: the message it saw last is
+    the one that decided the run.
+    """
+
+    def __init__(self, inner: runs.RunStore, recording: runs.RecordingClient) -> None:
+        self._inner = inner
+        self._recording = recording
+
+    async def set_session(self, run_id: runs.RunId, session_id: str) -> None:
+        await self._inner.set_session(run_id, session_id)
+
+    async def set_message(self, run_id: runs.RunId, message_id: str) -> None:
+        await self._inner.set_message(run_id, message_id)
+
+    async def finish(self, run_id: runs.RunId, status: runs.RunStatus, reason: str | None) -> bool:
+        if status != "handled":
+            return await self._inner.finish(run_id, status, reason)
+        text = runs.result_text(self._recording.message)
+        return await self._inner.finish(run_id, status, reason, result_text=text)  # type: ignore[call-arg]
 
 
 class Worker:
@@ -115,11 +147,13 @@ class Worker:
         pool: AsyncConnectionPool,
         client: OrchestratorClient,
         *,
+        schedule: ScheduleClient | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.settings = settings
         self.pool = pool
         self.client = client
+        self.schedule = schedule
         self.store = events.EventStore(pool)
         self.run_store: runs.RunStore = self.store
         self._fallback_store = _FallbackStore(self.store)
@@ -141,6 +175,7 @@ class Worker:
         for row in rows:
             if row.message_id is not None:
                 await self._track(row)
+        await self.chain_pass()
         held: list[int] = []
         while (claimed := await self._claim()) is not None:
             if claimed.event.endpoint_id in self._skip:
@@ -151,6 +186,67 @@ class Worker:
             async with self.pool.connection() as conn:
                 await events.release(conn, id)
         await self.prune_events()
+
+    async def chain_pass(self) -> None:
+        """Decide every pending chain once: skip, expire, wait or fire (design: trigger chain)."""
+        async with self.pool.connection() as conn:
+            pending = await events.chain_pending(conn)
+        now = datetime.now(UTC)
+        for event in pending:
+            try:
+                await self._advance_chain(event, now)
+            except (ScheduleUnavailable, OrchestratorUnavailable) as exc:
+                self._unavailable(("chain", event.id), exc)
+            except OrchestratorError as exc:
+                log.warning("event %s: chain check failed, retrying: %s", event.id, exc)
+
+    async def _set_chain(self, event: events.Event, status: str) -> bool:
+        async with self.pool.connection() as conn:
+            return await events.set_chain_status(conn, event.id, status)
+
+    async def _advance_chain(self, event: events.Event, now: datetime) -> None:
+        if event.status in ("ignored", "failed"):
+            await self._set_chain(event, "skipped")
+            return
+        wait = timedelta(seconds=self.settings.chain_max_wait_seconds)
+        if now - event.received_at > wait:
+            if await self._set_chain(event, "expired"):
+                log.info("event %s: chain expired", event.id)
+            return
+        if event.status != "handled" or self.schedule is None:
+            return
+        owns_session = event.update_of is None and event.session_id is not None
+        if owns_session and not await runs.session_finished(self.client, str(event.session_id)):
+            return
+        await self._fire_chain(event)
+
+    async def _fire_chain(self, event: events.Event) -> None:
+        """Start one chained run per target, then flip the status with a guarded update.
+
+        Every target is tried each pass; a target that already has its run answers 200 on the
+        schedule side, so a retry after a partial failure creates nothing twice.
+        """
+        assert self.schedule is not None
+        failed: list[Exception] = []
+        for target in event.then_schedule_ids or []:
+            try:
+                await self.schedule.chain(
+                    target,
+                    source_ref=str(event.id),
+                    previous_name=f"webhook:{event.endpoint_suffix}",
+                    previous_session_slug=event.session_slug,
+                    previous_result=event.result_text,
+                )
+            except ScheduleUnavailable as exc:
+                failed.append(exc)
+        if failed:
+            self._unavailable(("chain", event.id), failed[0])
+            return
+        self._unavailable_logged.pop(("chain", event.id), None)
+        if await self._set_chain(event, "fired"):
+            log.info(
+                "event %s: chain fired (%d targets)", event.id, len(event.then_schedule_ids or [])
+            )
 
     async def prune_events(self) -> None:
         """Delete final events past the retention window, in batches, at most hourly."""
@@ -270,10 +366,11 @@ class Worker:
             await self._fallback(event)
 
     async def _track_delivery(self, event: events.Event) -> None:
+        recording = runs.RecordingClient(self.client)
         try:
             outcome = await runs.track_delivery(
-                self.client,
-                self.run_store,
+                recording,
+                _CapturingStore(self.run_store, recording),
                 run_ref(event),
                 timeout_seconds=self.settings.run_timeout_seconds,
             )
@@ -399,10 +496,11 @@ class Worker:
         if event.update_of is not None:
             await self._track_delivery(event)
             return
+        recording = runs.RecordingClient(self.client)
         try:
             status = await runs.track(
-                self.client,
-                self._store_of(event),
+                recording,
+                _CapturingStore(self._store_of(event), recording),
                 run_ref(event),
                 datetime.now(UTC),
                 timeout_seconds=self.settings.run_timeout_seconds,
@@ -449,11 +547,12 @@ async def run_worker(
     client: OrchestratorClient,
     stop: asyncio.Event | None = None,
     *,
+    schedule: ScheduleClient | None = None,
     heartbeat_seconds: float = 10,
 ) -> None:
     """Hold the worker lock and tick until `stop` is set; raises LostLock when the lock goes."""
     stop = stop or asyncio.Event()
-    worker = Worker(settings, pool, client)
+    worker = Worker(settings, pool, client, schedule=schedule)
     async with advisory_singleton(pool, LOCK_NAME, heartbeat_seconds):
         log.info("worker lock acquired")
         wake = asyncio.Event()

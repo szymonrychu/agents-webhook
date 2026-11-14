@@ -19,6 +19,7 @@ from agents_common.settings import SettingsError, load_settings
 from agents_webhook import __version__
 from agents_webhook.api.app import create_admin_app, create_api_app
 from agents_webhook.ingest.app import create_ingest_app
+from agents_webhook.schedule_client import ScheduleClient
 from agents_webhook.secrets_box import SecretBox, SecretBoxError
 from agents_webhook.settings import LocalSettings, WebhookSettings
 from agents_webhook.worker import run_worker
@@ -124,17 +125,33 @@ def build_ingest_config(settings: WebhookSettings, pool, box: SecretBox) -> uvic
     )
 
 
-def build_api_config(settings: WebhookSettings, pool, client, box: SecretBox) -> uvicorn.Config:
-    return _base_config(create_api_app(settings, pool, client, box), settings)
+def build_api_config(
+    settings: WebhookSettings, pool, client, box: SecretBox, schedule: ScheduleClient | None = None
+) -> uvicorn.Config:
+    return _base_config(create_api_app(settings, pool, client, box, schedule=schedule), settings)
 
 
 def build_admin_config(
-    settings: WebhookSettings, pool, client, box: SecretBox, tokens: Sequence[str]
+    settings: WebhookSettings,
+    pool,
+    client,
+    box: SecretBox,
+    tokens: Sequence[str],
+    schedule: ScheduleClient | None = None,
 ) -> uvicorn.Config:
     """Service listener: the UI routes behind a bearer token, on its own port."""
-    return _base_config(
-        create_admin_app(settings, pool, client, box, tokens), settings, port=settings.admin_port
-    )
+    app = create_admin_app(settings, pool, client, box, tokens, schedule=schedule)
+    return _base_config(app, settings, port=settings.admin_port)
+
+
+def load_schedule_client(settings: WebhookSettings) -> ScheduleClient | None:
+    """The agents-schedule client, or None when chaining is not configured.
+
+    The token file is read once here; OSError or ValueError when it cannot be used.
+    """
+    if not settings.chaining_configured:
+        return None
+    return ScheduleClient.from_file(settings.schedule_url, settings.schedule_token_file)
 
 
 def load_admin_tokens(settings: WebhookSettings) -> list[str] | None:
@@ -211,19 +228,40 @@ def _cmd_api(settings: WebhookSettings) -> int:
         print(f"WEBHOOK_ADMIN_TOKENS_FILE: {exc}", file=sys.stderr)
         return EXIT_BAD_SETTINGS
 
+    try:
+        schedule = load_schedule_client(settings)
+    except (OSError, ValueError) as exc:
+        print(f"WEBHOOK_SCHEDULE_TOKEN_FILE: {exc}", file=sys.stderr)
+        return EXIT_BAD_SETTINGS
+
     async def body(pool, client, stop):
-        async with asyncio.TaskGroup() as group:
-            group.create_task(_serve(build_api_config(settings, pool, client, box), stop))
-            if tokens is not None:
-                config = build_admin_config(settings, pool, client, box, tokens)
+        try:
+            async with asyncio.TaskGroup() as group:
+                config = build_api_config(settings, pool, client, box, schedule)
                 group.create_task(_serve(config, stop))
+                if tokens is not None:
+                    admin = build_admin_config(settings, pool, client, box, tokens, schedule)
+                    group.create_task(_serve(admin, stop))
+        finally:
+            if schedule is not None:
+                await schedule.aclose()
 
     return _run(settings, body, client=True)
 
 
 def _cmd_worker(settings: WebhookSettings) -> int:
+    try:
+        schedule = load_schedule_client(settings)
+    except (OSError, ValueError) as exc:
+        print(f"WEBHOOK_SCHEDULE_TOKEN_FILE: {exc}", file=sys.stderr)
+        return EXIT_BAD_SETTINGS
+
     async def body(pool, client, stop):
-        await run_worker(settings, pool, client, stop)
+        try:
+            await run_worker(settings, pool, client, stop, schedule=schedule)
+        finally:
+            if schedule is not None:
+                await schedule.aclose()
 
     return _run(settings, body, client=True)
 

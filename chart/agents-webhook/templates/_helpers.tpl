@@ -129,6 +129,22 @@ key
 {{- required "admin.tokensSecret.name is required when admin.enabled" .Values.admin.tokensSecret.name -}}
 {{- end }}
 
+{{/* Mount point of the agents-schedule admin token file (the Secret key is projected to "token"). */}}
+{{- define "agents-webhook.scheduleTokenDir" -}}/var/run/secrets/schedule{{- end }}
+
+{{/* True ("1") when chaining is on; fails on a half-set schedule block. */}}
+{{- define "agents-webhook.scheduleEnabled" -}}
+{{- $s := .Values.schedule | default dict -}}
+{{- $name := (($s.tokenSecret | default dict).name) | default "" -}}
+{{- if and $s.url $name -}}
+1
+{{- else if $s.url -}}
+{{- fail "agents-webhook: schedule.tokenSecret.name is required when schedule.url is set" -}}
+{{- else if $name -}}
+{{- fail "agents-webhook: schedule.url is required when schedule.tokenSecret.name is set" -}}
+{{- end -}}
+{{- end }}
+
 {{/*
 Container env for a component. Call with (dict "context" . "component" "api"):
 the settings ConfigMap, the database URL, and the orchestrator token for api and worker only.
@@ -156,6 +172,12 @@ env:
 {{- if has .component (list "ingest" "api") }}
   - name: WEBHOOK_ENDPOINT_KEY_FILE
     value: {{ printf "%s/key" (include "agents-webhook.endpointKeyDir" .context) | quote }}
+{{- end }}
+{{- if and (has .component (list "api" "worker")) (include "agents-webhook.scheduleEnabled" .context) }}
+  - name: WEBHOOK_SCHEDULE_URL
+    value: {{ .context.Values.schedule.url | quote }}
+  - name: WEBHOOK_SCHEDULE_TOKEN_FILE
+    value: {{ printf "%s/token" (include "agents-webhook.scheduleTokenDir" .context) | quote }}
 {{- end }}
 {{- if has .component (list "api" "worker") }}
   - name: WEBHOOK_ORCHESTRATOR_TOKEN

@@ -57,6 +57,15 @@ admin:
     name: ""
     key: tokens
 
+# Chaining: agents-schedule's admin listener (WEBHOOK_SCHEDULE_URL) and the Secret holding its
+# admin bearer token (mounted as a file, WEBHOOK_SCHEDULE_TOKEN_FILE, on api and worker only).
+# Both are required together; leave both empty to turn chaining off.
+schedule:
+  url: ""
+  tokenSecret:
+    name: ""
+    key: token
+
 # Limits, rendered into the settings ConfigMap read by ingest and worker.
 limits:
   # WEBHOOK_MAX_IN_PROGRESS: events running at once, across all endpoints.

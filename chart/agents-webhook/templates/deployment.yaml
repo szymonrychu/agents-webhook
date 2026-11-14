@@ -100,6 +100,11 @@ spec:
               mountPath: {{ include "agents-webhook.adminTokensDir" $ }}
               readOnly: true
             {{- end }}
+            {{- if and (ne $component "ingest") (include "agents-webhook.scheduleEnabled" $) }}
+            - name: schedule-token
+              mountPath: {{ include "agents-webhook.scheduleTokenDir" $ }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -118,6 +123,14 @@ spec:
             items:
               - key: {{ $.Values.admin.tokensSecret.key | default "tokens" }}
                 path: tokens
+        {{- end }}
+        {{- if and (ne $component "ingest") (include "agents-webhook.scheduleEnabled" $) }}
+        - name: schedule-token
+          secret:
+            secretName: {{ $.Values.schedule.tokenSecret.name }}
+            items:
+              - key: {{ $.Values.schedule.tokenSecret.key | default "token" }}
+                path: token
         {{- end }}
       {{- with $.Values.nodeSelector }}
       nodeSelector:

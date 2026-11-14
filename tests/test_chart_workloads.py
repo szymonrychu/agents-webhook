@@ -383,3 +383,63 @@ def test_endpoint_key_existing_secret_is_referenced():
 def test_endpoint_key_missing_fails_clearly():
     values = {k: v for k, v in BASE.items() if k != "endpointKey"}
     assert "endpointKey" in render_error(values)
+
+
+# --- chaining -------------------------------------------------------------------------------
+
+SCHEDULE = {
+    "schedule": {
+        "url": "http://agents-schedule-api:8001",
+        "tokenSecret": {"name": "wh-schedule-token", "key": "token"},
+    }
+}
+
+
+def test_schedule_off_by_default():
+    deps = deployments(render())
+    for dep in deps.values():
+        container = main_container(dep)
+        assert "WEBHOOK_SCHEDULE_URL" not in env_names(container)
+        assert "WEBHOOK_SCHEDULE_TOKEN_FILE" not in env_names(container)
+        volumes = dep["spec"]["template"]["spec"]["volumes"]
+        assert "schedule-token" not in {v["name"] for v in volumes}
+
+
+def test_schedule_wired_on_api_and_worker_only():
+    deps = deployments(render(SCHEDULE))
+    for name in ("api", "worker"):
+        container = main_container(deps[name])
+        env = env_values(container)
+        assert env["WEBHOOK_SCHEDULE_URL"] == "http://agents-schedule-api:8001"
+        assert env["WEBHOOK_SCHEDULE_TOKEN_FILE"] == "/var/run/secrets/schedule/token"
+        mount = next(m for m in container["volumeMounts"] if m["name"] == "schedule-token")
+        assert mount["mountPath"] == "/var/run/secrets/schedule" and mount["readOnly"] is True
+        volume = next(
+            v
+            for v in deps[name]["spec"]["template"]["spec"]["volumes"]
+            if v["name"] == "schedule-token"
+        )
+        assert volume["secret"]["secretName"] == "wh-schedule-token"
+        assert volume["secret"]["items"] == [{"key": "token", "path": "token"}]
+    ingest = main_container(deps["ingest"])
+    assert "WEBHOOK_SCHEDULE_URL" not in env_names(ingest)
+    assert "schedule-token" not in {m["name"] for m in ingest["volumeMounts"]}
+
+
+def test_schedule_token_is_never_in_the_configmap_or_env_values():
+    docs = render(SCHEDULE)
+    data = next(d for d in docs if d["kind"] == "ConfigMap")["data"]
+    assert "WEBHOOK_SCHEDULE_TOKEN_FILE" not in data
+    for dep in deployments(docs).values():
+        for env in main_container(dep).get("env", []):
+            assert "secretKeyRef" not in env or env["name"] != "WEBHOOK_SCHEDULE_TOKEN_FILE"
+
+
+def test_schedule_url_without_token_secret_fails_clearly():
+    err = render_error(_merge(BASE, {"schedule": {"url": "http://agents-schedule-api:8001"}}))
+    assert "schedule.tokenSecret.name" in err
+
+
+def test_schedule_token_secret_without_url_fails_clearly():
+    err = render_error(_merge(BASE, {"schedule": {"tokenSecret": {"name": "x"}}}))
+    assert "schedule.url" in err
