@@ -17,6 +17,7 @@ from agents_webhook import prompt, worker
 from agents_webhook.db import endpoints, events
 from agents_webhook.db.endpoints import EndpointIn
 from agents_webhook.normalize import NormalizedEvent
+from agents_webhook.schedule_client import ScheduleUnavailable
 from agents_webhook.settings import WebhookSettings
 
 PAYLOAD = {"pull_request": {"number": 1}, "x": "from-payload"}
@@ -114,21 +115,65 @@ def settings(db) -> WebhookSettings:
     return make_settings(db)
 
 
+class FakeSchedule:
+    """Stands in for ScheduleClient: records chain calls; `fail` lists targets that refuse."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.fail: set[uuid.UUID] = set()
+        self.gone: set[uuid.UUID] = set()
+        self.known: set[uuid.UUID] = set()
+        self.down = False
+
+    async def get_schedule(self, schedule_id: uuid.UUID) -> bool:
+        if self.down:
+            raise ScheduleUnavailable("down")
+        return schedule_id in self.known
+
+    async def chain(self, schedule_id, *, source_ref, previous_name, previous_session_slug,
+                    previous_result) -> None:  # fmt: skip
+        if self.down or schedule_id in self.fail:
+            raise ScheduleUnavailable("refused")
+        self.calls.append(
+            {
+                "target": schedule_id,
+                "source_ref": source_ref,
+                "previous_name": previous_name,
+                "previous_session_slug": previous_session_slug,
+                "previous_result": previous_result,
+            }
+        )
+
+
 @pytest.fixture
-def make_worker(pool, client, settings):
+def schedule() -> FakeSchedule:
+    return FakeSchedule()
+
+
+@pytest.fixture
+def make_worker(pool, client, settings, schedule):
     def make(**over) -> worker.Worker:
         s = settings.model_copy(update=over) if over else settings
-        return worker.Worker(s, pool, client)
+        return worker.Worker(s, pool, client, schedule=schedule)
 
     return make
 
 
 @pytest.fixture
 async def make_endpoint(conn, preset):
-    async def make(template: str | None = None, preset_id: str | None = None):
+    async def make(
+        template: str | None = None,
+        preset_id: str | None = None,
+        then: list[uuid.UUID] | None = None,
+    ):
         ep, _ = await endpoints.create(
             conn,
-            EndpointIn(type="github-pr", preset_id=preset_id or preset, prompt_template=template),
+            EndpointIn(
+                type="github-pr",
+                preset_id=preset_id or preset,
+                prompt_template=template,
+                then_schedule_ids=then or [],
+            ),
             min_password_length=16,
             box=BOX,
         )
@@ -780,6 +825,19 @@ async def test_retention_prunes_old_final_events(conn, make_endpoint, make_worke
     assert (await row(conn, child)).duplicate_of is None
 
 
+async def test_retention_keeps_a_row_whose_chain_is_pending(conn, make_endpoint, make_worker):
+    ep = await make_endpoint(then=[uuid.uuid4()])
+    pending = await rec(conn, ep, ev("k/1"))
+    done = await rec(conn, ep, ev("k/2"))
+    await age(conn, [pending, done], 40, "handled")
+    await events.set_chain_status(conn, done, "fired")
+
+    await make_worker(events_retention_days=30).prune_events()
+
+    assert await count_ids(conn, [pending]) == 1
+    assert await count_ids(conn, [done]) == 0
+
+
 async def test_retention_batches_and_runs_at_most_hourly(
     conn, make_endpoint, pool, client, settings
 ):
@@ -824,3 +882,234 @@ async def test_worker_context_matches_preview_for_draft_and_changed(
     expected = prompt.preview(template, PAYLOAD, event)
     assert expected == "draft=True changed=description,title Fix the thing"
     assert msg["text"] == f"{expected}\n\n{marker('webhook:event', recorded.id)}"
+
+
+# --- chaining -------------------------------------------------------------------------------
+
+T1, T2 = uuid.uuid4(), uuid.uuid4()
+
+
+async def chain_status(conn, id: int) -> str | None:
+    return (await row(conn, id)).chain_status
+
+
+async def started(conn, fake, make_endpoint, make_worker, targets=(T1, T2), **over):
+    """An endpoint with chain targets and one event dispatched; the worker, id and message."""
+    ep = await make_endpoint(then=list(targets))
+    id = await rec(conn, ep)
+    w = make_worker(**over)
+    await w.tick()
+    r = await row(conn, id)
+    return w, id, int(r.message_id), r.session_id
+
+
+async def test_handled_event_stores_the_turns_final_text(conn, fake, make_endpoint, make_worker):
+    w, id, message, _ = await started(conn, fake, make_endpoint, make_worker)
+    fake.complete_turn(message, "the final words")
+    await w.tick()
+    r = await row(conn, id)
+    assert r.status == "handled" and r.result_text == "the final words"
+
+
+async def test_result_text_is_capped(conn, fake, make_endpoint, make_worker):
+    w, id, message, _ = await started(conn, fake, make_endpoint, make_worker)
+    fake.complete_turn(message, "x" * 20000)
+    await w.tick()
+    assert len((await row(conn, id)).result_text) == 8000
+
+
+async def test_failed_event_has_no_result_text(conn, fake, make_endpoint, make_worker):
+    w, id, message, _ = await started(conn, fake, make_endpoint, make_worker)
+    fake.fail_turn(message)
+    await w.tick()
+    r = await row(conn, id)
+    assert r.status == "failed" and r.result_text is None
+
+
+async def test_no_chain_while_the_session_is_active(
+    conn, fake, schedule, make_endpoint, make_worker
+):
+    w, id, message, _ = await started(conn, fake, make_endpoint, make_worker)
+    fake.complete_turn(message, "done")
+    await w.tick()
+    await w.tick()
+    assert schedule.calls == []
+    assert await chain_status(conn, id) == "pending"
+
+
+@pytest.mark.parametrize("how", ["request_close", "discard_session", "remove_session"])
+async def test_chain_fires_once_the_session_finished(
+    conn, fake, schedule, make_endpoint, make_worker, how
+):
+    w, id, message, session = await started(conn, fake, make_endpoint, make_worker)
+    fake.complete_turn(message, "the result")
+    await w.tick()
+    getattr(fake, how)(session)
+
+    await w.tick()
+    await w.tick()
+
+    assert [c["target"] for c in schedule.calls] == [T1, T2]
+    assert {c["source_ref"] for c in schedule.calls} == {str(id)}
+    assert {c["previous_name"] for c in schedule.calls} == {
+        "webhook:" + (await row(conn, id)).endpoint_suffix
+    }
+    assert {c["previous_result"] for c in schedule.calls} == {"the result"}
+    assert {c["previous_session_slug"] for c in schedule.calls} == {f"wh-{id}"}
+    assert await chain_status(conn, id) == "fired"
+
+
+async def test_chain_waits_for_handled_when_the_session_closes_first(
+    conn, fake, schedule, make_endpoint, make_worker
+):
+    w, id, message, session = await started(conn, fake, make_endpoint, make_worker)
+    fake.request_close(session)  # self-close inside the first turn
+    await w.tick()
+    assert schedule.calls == [] and await chain_status(conn, id) == "pending"
+    fake.complete_turn(message, "late")
+    await w.tick()
+    assert len(schedule.calls) == 2 and await chain_status(conn, id) == "fired"
+
+
+@pytest.mark.parametrize("kind", ["failed", "ignored"])
+async def test_failed_and_ignored_events_skip_the_chain(
+    conn, fake, schedule, make_endpoint, make_worker, kind
+):
+    ep = await make_endpoint(then=[T1])
+    if kind == "failed":
+        w, id, message, _ = await started(conn, fake, make_endpoint, make_worker)
+        fake.fail_turn(message)
+    else:
+        w = make_worker()
+        recorded = await events.record(
+            conn, ep, ev("k/ig"), PAYLOAD, ignore_reason="filter_denied", max_queue=1000
+        )
+        id = recorded.id
+    await w.tick()
+    assert await chain_status(conn, id) == "skipped" and schedule.calls == []
+
+
+async def test_duplicate_delivery_skips_its_chain(conn, schedule, make_endpoint, make_worker):
+    ep = await make_endpoint(then=[T1])
+    first = await rec(conn, ep)
+    dup = await events.record(
+        conn, ep, ev(delivery_id="d1"), PAYLOAD, ignore_reason=None, max_queue=1000
+    )
+    again = await events.record(
+        conn, ep, ev(delivery_id="d1"), PAYLOAD, ignore_reason=None, max_queue=1000
+    )
+    assert again.reason == "duplicate"
+    await make_worker().tick()
+    assert await chain_status(conn, again.id) == "skipped"
+    assert await chain_status(conn, dup.id) == "skipped"
+    assert await chain_status(conn, first.id if hasattr(first, "id") else first) == "pending"
+
+
+async def test_event_without_targets_never_chains(conn, fake, schedule, make_endpoint, make_worker):
+    ep = await make_endpoint()
+    id = await rec(conn, ep)
+    w = make_worker()
+    await w.tick()
+    fake.complete_turn(int((await row(conn, id)).message_id), "x")
+    await w.tick()
+    assert schedule.calls == [] and await chain_status(conn, id) is None
+
+
+async def test_update_event_fires_at_handled_without_waiting_for_the_session(
+    conn, fake, schedule, make_endpoint, make_worker, monkeypatch
+):
+    ep = await make_endpoint(then=[T1])
+    parent_id = await rec(conn, ep)
+    w = make_worker()
+    await w.tick()
+    parent = await row(conn, parent_id)
+    child_id = await rec(conn, ep, ev(action="synchronize"))
+    # The child was claimed as an update of the running parent session and its message was sent.
+    await conn.execute(
+        "UPDATE events SET status = 'handled', update_of = %s, session_id = %s, "
+        "session_slug = %s WHERE id = %s",
+        (parent_id, parent.session_id, parent.session_slug, child_id),
+    )
+
+    await w.tick()
+
+    assert [c["source_ref"] for c in schedule.calls] == [str(child_id)]
+    assert await chain_status(conn, child_id) == "fired"
+    assert await chain_status(conn, parent_id) == "pending"  # its own session still runs
+
+
+async def test_partial_failure_retries_and_fires_once(
+    conn, fake, schedule, make_endpoint, make_worker
+):
+    w, id, message, session = await started(conn, fake, make_endpoint, make_worker)
+    fake.complete_turn(message, "r")
+    await w.tick()
+    fake.request_close(session)
+    schedule.fail = {T2}
+
+    await w.tick()
+    assert await chain_status(conn, id) == "pending"
+    assert [c["target"] for c in schedule.calls] == [T1]
+
+    schedule.fail = set()
+    await w.tick()
+    assert await chain_status(conn, id) == "fired"
+    await w.tick()
+    # T1 is offered again (the schedule side answers 200 for it); the status flips only once.
+    assert sorted(str(c["target"]) for c in schedule.calls).count(str(T2)) == 1
+    assert await chain_status(conn, id) == "fired"
+
+
+async def test_schedule_down_keeps_the_chain_pending(
+    conn, fake, schedule, make_endpoint, make_worker
+):
+    w, id, message, session = await started(conn, fake, make_endpoint, make_worker)
+    fake.complete_turn(message, "r")
+    await w.tick()
+    fake.request_close(session)
+    schedule.down = True
+    await w.tick()
+    assert await chain_status(conn, id) == "pending"
+    schedule.down = False
+    await w.tick()
+    assert await chain_status(conn, id) == "fired"
+
+
+async def test_pending_chain_expires(conn, fake, schedule, make_endpoint, make_worker):
+    w, id, message, session = await started(conn, fake, make_endpoint, make_worker)
+    fake.complete_turn(message, "r")
+    await w.tick()
+    fake.request_close(session)
+    await conn.execute(
+        "UPDATE events SET received_at = now() - interval '2 days' WHERE id = %s", (id,)
+    )
+    await w.tick()
+    assert await chain_status(conn, id) == "expired" and schedule.calls == []
+
+
+async def test_orchestrator_down_does_not_break_the_chain_pass(
+    conn, fake, switch, schedule, make_endpoint, make_worker
+):
+    w, id, message, session = await started(conn, fake, make_endpoint, make_worker)
+    fake.complete_turn(message, "r")
+    await w.tick()
+    switch.down = True
+    await w.tick()
+    assert await chain_status(conn, id) == "pending"
+    switch.down = False
+    fake.request_close(session)
+    await w.tick()
+    assert await chain_status(conn, id) == "fired"
+
+
+async def test_unconfigured_chaining_leaves_pending_until_expiry(
+    conn, fake, pool, client, settings, make_endpoint
+):
+    ep = await make_endpoint(then=[T1])
+    id = await rec(conn, ep)
+    w = worker.Worker(settings, pool, client)  # no schedule client
+    await w.tick()
+    fake.complete_turn(int((await row(conn, id)).message_id), "r")
+    fake.request_close((await row(conn, id)).session_id)
+    await w.tick()
+    assert await chain_status(conn, id) == "pending"

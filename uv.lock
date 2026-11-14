@@ -4,8 +4,8 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "agents-common"
-version = "0.7.0"
-source = { git = "https://github.com/szymonrychu/agents-common?rev=v0.7.0#9eeaba84f71bb657b195d1742a5fb47177ff997a" }
+version = "0.17.0"
+source = { git = "https://github.com/szymonrychu/agents-common?rev=v0.17.0#129f2219143b059ff3370013cd0f58e470c956d9" }
 dependencies = [
     { name = "httpx" },
     { name = "jinja2" },
@@ -44,7 +44,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agents-common", git = "https://github.com/szymonrychu/agents-common?rev=v0.7.0" },
+    { name = "agents-common", git = "https://github.com/szymonrychu/agents-common?rev=v0.17.0" },
     { name = "cryptography", specifier = ">=50.0.2" },
     { name = "fastapi" },
     { name = "google-re2", specifier = ">=1.1.20251105" },
@@ -54,7 +54,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "agents-common", extras = ["testing"], git = "https://github.com/szymonrychu/agents-common?rev=v0.7.0" },
+    { name = "agents-common", extras = ["testing"], git = "https://github.com/szymonrychu/agents-common?rev=v0.17.0" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },

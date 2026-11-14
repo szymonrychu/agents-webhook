@@ -8,6 +8,7 @@ never carries either, and a secret is returned exactly once, by the call that cr
 
 import asyncio
 import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -27,7 +28,9 @@ AUTH_MODES = ("basic", "header", "bearer", "hmac")
 HMAC_ALGORITHMS = ("sha256",)
 HEADER_NAME_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}")
 PREFIX_MAX = 32
+CHAIN_MAX_TARGETS = 10
 PATCHABLE = (
+    "then_schedule_ids",
     "preset_id",
     "prompt_template",
     "suffix",
@@ -43,7 +46,7 @@ PATCHABLE = (
 _COLUMNS = (
     "id, suffix, type, preset_id, prompt_template, username, created_at, "
     "credentials_rotated_at, filters, auth_mode, auth_header, hmac_algorithm, hmac_prefix, "
-    "hmac_timestamp_header, updated_at, secret_ct IS NOT NULL AS has_secret"
+    "hmac_timestamp_header, updated_at, secret_ct IS NOT NULL AS has_secret, then_schedule_ids"
 )
 
 
@@ -65,6 +68,7 @@ class Endpoint:
     hmac_timestamp_header: str | None
     updated_at: datetime
     has_secret: bool
+    then_schedule_ids: list[uuid.UUID] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,7 @@ class EndpointIn:
     hmac_algorithm: str | None = None
     hmac_prefix: str | None = None
     hmac_timestamp_header: str | None = None
+    then_schedule_ids: list[uuid.UUID] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,15 @@ def _check_suffix(suffix: str) -> str:
     if not SUFFIX_RE.fullmatch(suffix):
         raise ValueError("suffix: must match ^[A-Za-z0-9._~-]{1,128}$")
     return suffix
+
+
+def check_targets(ids: list[uuid.UUID]) -> list[uuid.UUID]:
+    """The chain targets as given: at most CHAIN_MAX_TARGETS, no duplicates."""
+    if len(ids) > CHAIN_MAX_TARGETS:
+        raise ValueError(f"then_schedule_ids: at most {CHAIN_MAX_TARGETS} targets")
+    if len(set(ids)) != len(ids):
+        raise ValueError("then_schedule_ids: duplicate targets")
+    return list(ids)
 
 
 def _check_username(username: str) -> str:
@@ -230,6 +244,7 @@ async def create(
     if not data.preset_id:
         raise ValueError("preset_id: required")
     canonical = filters.EMPTY if data.filters is None else filters.validate(data.type, data.filters)
+    targets = check_targets(data.then_schedule_ids)
     suffix = credentials.generate_suffix() if data.suffix is None else _check_suffix(data.suffix)
     auth = _auth_config(
         data.auth_mode,
@@ -255,8 +270,8 @@ async def create(
             await cur.execute(
                 "INSERT INTO endpoints (id, suffix, type, preset_id, prompt_template, username, "
                 "password_hash, filters, auth_mode, auth_header, hmac_algorithm, hmac_prefix, "
-                "hmac_timestamp_header, secret_ct, secret_kid) "
-                f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "hmac_timestamp_header, secret_ct, secret_kid, then_schedule_ids) "
+                f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 f"RETURNING {_COLUMNS}",
                 (
                     endpoint_id,
@@ -274,6 +289,7 @@ async def create(
                     auth.timestamp_header,
                     secret_ct,
                     kid,
+                    targets,
                 ),
             )
             endpoint = await cur.fetchone()
@@ -340,7 +356,7 @@ async def patch(
     for name in fields:
         if name not in PATCHABLE:
             raise ValueError(f"{name}: not editable")
-    for name in ("preset_id", "suffix", "filters", "auth_mode", "username"):
+    for name in ("preset_id", "suffix", "filters", "auth_mode", "username", "then_schedule_ids"):
         if name in fields and fields[name] is None:
             raise ValueError(f"{name}: cannot be null")
     if "preset_id" in fields and not fields["preset_id"]:
@@ -357,6 +373,8 @@ async def patch(
             for name in ("preset_id", "prompt_template"):
                 if name in fields:
                     sets[name] = fields[name]
+            if "then_schedule_ids" in fields:
+                sets["then_schedule_ids"] = check_targets(fields["then_schedule_ids"])
             if "suffix" in fields:
                 sets["suffix"] = _check_suffix(fields["suffix"])
             if "filters" in fields:
@@ -452,6 +470,7 @@ async def clone(
             hmac_algorithm=source.hmac_algorithm,
             hmac_prefix=source.hmac_prefix,
             hmac_timestamp_header=source.hmac_timestamp_header,
+            then_schedule_ids=list(source.then_schedule_ids),
         )
         return await create(conn, data, min_password_length=min_password_length, box=box)
 

@@ -26,6 +26,12 @@ class FilterResult(BaseModel):
 AuthMode = Literal["basic", "header", "bearer", "hmac"]
 
 
+def _no_duplicates(value: list[uuid.UUID] | None) -> list[uuid.UUID] | None:
+    if value is not None and len(set(value)) != len(value):
+        raise ValueError("duplicate targets")
+    return value
+
+
 def _preset_is_uuid(value: str) -> str:
     """The orchestrator serves presets by UUID only; anything else is an unknown preset."""
     try:
@@ -50,8 +56,10 @@ class EndpointIn(BaseModel):
     hmac_algorithm: Literal["sha256"] | None = None
     hmac_prefix: str | None = None
     hmac_timestamp_header: str | None = None
+    then_schedule_ids: list[uuid.UUID] = Field(default_factory=list, max_length=10)
 
     _preset = field_validator("preset_id")(_preset_is_uuid)
+    _unique = field_validator("then_schedule_ids")(_no_duplicates)
 
 
 class EndpointPatch(BaseModel):
@@ -73,6 +81,10 @@ class EndpointPatch(BaseModel):
     hmac_algorithm: Literal["sha256"] | None = None
     hmac_prefix: str | None = None
     hmac_timestamp_header: str | None = None
+    then_schedule_ids: list[uuid.UUID] | None = Field(default=None, max_length=10)
+    """Chain targets: null leaves them unchanged, an empty list clears them."""
+
+    _unique = field_validator("then_schedule_ids")(_no_duplicates)
 
     @field_validator("preset_id")
     @classmethod
@@ -115,6 +127,7 @@ class EndpointView(BaseModel):
     hmac_timestamp_header: str | None
     updated_at: datetime
     has_secret: bool
+    then_schedule_ids: list[uuid.UUID]
 
 
 class EndpointCreated(EndpointView):
@@ -155,6 +168,8 @@ class EventView(BaseModel):
     duplicate_of: int | None
     started_at: datetime | None
     finished_at: datetime | None
+    then_schedule_ids: list[uuid.UUID] | None
+    chain_status: str | None
 
 
 class EventDetail(EventView):

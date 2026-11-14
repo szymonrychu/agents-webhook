@@ -9,6 +9,7 @@ status moves go through `agents_common.db.transition`, and claims use
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -37,7 +38,8 @@ _COLUMNS = (
     "kind, action, repo, number, title, body, comment_body, url, author, actor, labels, payload, "
     "delivery_id, "
     "dedup_key, status, reason, preset_id, prompt_template, update_of, duplicate_of, deliveries, "
-    "session_id, session_slug, message_id, started_at, finished_at, draft, changed, not_before"
+    "session_id, session_slug, message_id, started_at, finished_at, draft, changed, not_before, "
+    "then_schedule_ids, chain_status, result_text"
 )
 # Ignored rows keep at most this much of a payload; only `new` rows keep it whole.
 IGNORED_PAYLOAD_CAP = 4096
@@ -102,6 +104,9 @@ class Event:
     draft: bool
     changed: Any
     not_before: datetime | None
+    then_schedule_ids: list[uuid.UUID] | None
+    chain_status: str | None
+    result_text: str | None
 
 
 @dataclass(frozen=True)
@@ -150,6 +155,9 @@ def _values(endpoint: Endpoint, event: NormalizedEvent, payload: Any) -> dict[st
         "dedup_key": event.dedup_key,
         "preset_id": endpoint.preset_id,
         "prompt_template": endpoint.prompt_template,
+        # Snapshot at insert: later edits of the endpoint never change what an event chains to.
+        "then_schedule_ids": list(endpoint.then_schedule_ids) or None,
+        "chain_status": "pending" if endpoint.then_schedule_ids else None,
     }
 
 
@@ -430,9 +438,18 @@ class EventStore:
                 (message_id, run_id),
             )
 
-    async def finish(self, run_id: RunId, status: RunStatus, reason: str | None) -> bool:
+    async def finish(
+        self,
+        run_id: RunId,
+        status: RunStatus,
+        reason: str | None,
+        *,
+        result_text: str | None = None,
+    ) -> bool:
+        """Finish the row; `result_text` (the turn's final text) is stored in the same update."""
         if status not in ("handled", "failed"):
             raise ValueError(f"status: must be handled or failed, not {status!r}")
+        columns = {"result_text": result_text} if result_text is not None else {}
         async with self._pool.connection() as conn:
             return await transition(
                 conn,
@@ -442,18 +459,38 @@ class EventStore:
                 status,
                 reason=reason,
                 finished_at=await _now(conn),
+                **columns,
             )
+
+
+async def chain_pending(conn: psycopg.AsyncConnection) -> list[Event]:
+    """Every event whose chain is still pending, oldest first."""
+    return await _fetch(
+        conn,
+        f"SELECT {_COLUMNS} FROM events WHERE chain_status = 'pending' ORDER BY received_at, id",
+    )
+
+
+async def set_chain_status(conn: psycopg.AsyncConnection, id: int, status: str) -> bool:
+    """Guarded `pending -> status`: True only for the caller that moved the row."""
+    cur = await conn.execute(
+        "UPDATE events SET chain_status = %s WHERE id = %s AND chain_status = 'pending'",
+        (status, id),
+    )
+    return cur.rowcount == 1
 
 
 async def prune(conn: psycopg.AsyncConnection, *, retention_days: int, batch: int) -> int:
     """Delete up to `batch` final events (handled, ignored, failed) idle for `retention_days`.
 
-    Never touches `new` or `in-progress` rows. A row that survives but points at a pruned row
-    through update_of/duplicate_of has the reference nulled first. Returns the rows deleted.
+    Never touches `new` or `in-progress` rows, nor a row whose chain is still pending. A row
+    that survives but points at a pruned row through update_of/duplicate_of has the reference
+    nulled first. Returns the rows deleted.
     """
     async with conn.transaction():
         cur = await conn.execute(
             "SELECT id FROM events WHERE status IN ('handled', 'ignored', 'failed') "
+            "AND chain_status IS DISTINCT FROM 'pending' "
             "AND updated_at < now() - make_interval(days => %s) ORDER BY id LIMIT %s "
             "FOR UPDATE SKIP LOCKED",
             (retention_days, batch),

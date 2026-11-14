@@ -20,6 +20,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from agents_webhook.api.routes import PREFIX, ApiError, build_router
+from agents_webhook.schedule_client import ScheduleClient
 from agents_webhook.secrets_box import SecretBox
 from agents_webhook.settings import WebhookSettings
 
@@ -68,6 +69,7 @@ def _build_app(
     pool: AsyncConnectionPool,
     client: OrchestratorClient,
     box: SecretBox,
+    schedule: ScheduleClient | None,
 ) -> FastAPI:
     app = FastAPI(
         title="agents-webhook API",
@@ -75,7 +77,7 @@ def _build_app(
         docs_url=None,
         redoc_url=None,
     )
-    app.include_router(build_router(settings, pool, client, box))
+    app.include_router(build_router(settings, pool, client, box, schedule))
 
     @app.exception_handler(ApiError)
     async def _api_error(request: Request, exc: ApiError) -> JSONResponse:
@@ -123,9 +125,11 @@ def create_api_app(
     pool: AsyncConnectionPool,
     client: OrchestratorClient,
     box: SecretBox,
+    *,
+    schedule: ScheduleClient | None = None,
 ) -> FastAPI:
     """The UI app: reachable only from the allowed source addresses (the SSO sidecar)."""
-    app = _build_app(settings, pool, client, box)
+    app = _build_app(settings, pool, client, box, schedule)
     app.add_middleware(SourceAllowlist, networks=settings.api_networks())
     return app
 
@@ -136,8 +140,10 @@ def create_admin_app(
     client: OrchestratorClient,
     box: SecretBox,
     tokens: Iterable[str],
+    *,
+    schedule: ScheduleClient | None = None,
 ) -> FastAPI:
     """The same routes for service callers (the orchestrator relay): a bearer token, no SSO."""
-    app = _build_app(settings, pool, client, box)
+    app = _build_app(settings, pool, client, box, schedule)
     app.add_middleware(ServiceTokenGate, tokens=tokens)
     return app

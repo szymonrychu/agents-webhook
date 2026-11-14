@@ -1,6 +1,7 @@
 import base64
 import re
 import secrets
+import uuid
 
 import psycopg
 import pytest
@@ -980,3 +981,65 @@ async def test_clone_overrides_and_errors(conn):
         await endpoints.clone(conn, src.id, suffix="orig", min_password_length=MIN, box=BOX)
     assert await endpoints.clone(conn, 9999, min_password_length=MIN, box=BOX) is None
     assert len(await endpoints.list_all(conn)) == 2
+
+
+# --- chaining (migration 0008) --------------------------------------------------------------
+
+T1, T2 = uuid.uuid4(), uuid.uuid4()
+
+
+async def test_create_defaults_to_no_chain_targets(conn):
+    ep, _ = await endpoints.create(
+        conn, EndpointIn(type="github-pr", preset_id="p"), min_password_length=MIN, box=BOX
+    )
+    assert ep.then_schedule_ids == []
+
+
+async def test_create_stores_chain_targets_in_order(conn):
+    ep, _ = await endpoints.create(
+        conn,
+        EndpointIn(type="github-pr", preset_id="p", then_schedule_ids=[T2, T1]),
+        min_password_length=MIN,
+        box=BOX,
+    )
+    assert (await endpoints.get(conn, ep.id)).then_schedule_ids == [T2, T1]
+
+
+async def test_create_refuses_duplicate_and_too_many_targets(conn):
+    for ids in ([T1, T1], [uuid.uuid4() for _ in range(11)]):
+        with pytest.raises(ValueError, match="then_schedule_ids"):
+            await endpoints.create(
+                conn,
+                EndpointIn(type="github-pr", preset_id="p", then_schedule_ids=ids),
+                min_password_length=MIN,
+                box=BOX,
+            )
+
+
+async def test_patch_replaces_clears_and_leaves_targets(conn):
+    ep, _ = await endpoints.create(
+        conn,
+        EndpointIn(type="github-pr", preset_id="p", then_schedule_ids=[T1]),
+        min_password_length=MIN,
+        box=BOX,
+    )
+    kw = {"min_password_length": MIN, "box": BOX}
+    patched = await endpoints.patch(conn, ep.id, {"then_schedule_ids": [T2]}, **kw)
+    assert patched.endpoint.then_schedule_ids == [T2]
+    patched = await endpoints.patch(conn, ep.id, {"prompt_template": "x"}, **kw)
+    assert patched.endpoint.then_schedule_ids == [T2]
+    patched = await endpoints.patch(conn, ep.id, {"then_schedule_ids": []}, **kw)
+    assert patched.endpoint.then_schedule_ids == []
+    with pytest.raises(ValueError, match="then_schedule_ids"):
+        await endpoints.patch(conn, ep.id, {"then_schedule_ids": [T1, T1]}, **kw)
+
+
+async def test_clone_copies_chain_targets(conn):
+    ep, _ = await endpoints.create(
+        conn,
+        EndpointIn(type="github-pr", preset_id="p", then_schedule_ids=[T1, T2]),
+        min_password_length=MIN,
+        box=BOX,
+    )
+    cloned, _ = await endpoints.clone(conn, ep.id, min_password_length=MIN, box=BOX)
+    assert cloned.then_schedule_ids == [T1, T2]
